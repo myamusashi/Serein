@@ -177,8 +177,23 @@ impl LoginView {
 			true
 		});
 		view.connect_create(|_, _| None);
-		view.connect_permission_request(|_, request| {
-			request.deny();
+		view.connect_permission_request(|view, request| {
+			// Embedded verification's cookie access is separate from device permissions.
+			// This exception grants no device permissions or persistent storage.
+			let verification_storage = view.uri().is_some_and(|uri| discord_origin(&uri))
+				&& request
+					.downcast_ref::<webkit6::WebsiteDataAccessPermissionRequest>()
+					.is_some_and(|request| {
+						verification_storage_domains(
+							request.current_domain().as_deref(),
+							request.requesting_domain().as_deref(),
+						)
+					});
+			if verification_storage {
+				request.allow();
+			} else {
+				request.deny();
+			}
 			true
 		});
 		view.connect_query_permission_state(|_, query| {
@@ -329,9 +344,36 @@ impl Drop for LoginView {
 	}
 }
 
+fn verification_storage_domains(current: Option<&str>, requesting: Option<&str>) -> bool {
+	current == Some("discord.com")
+		&& requesting
+			.is_some_and(|domain| domain == "hcaptcha.com" || domain.ends_with(".hcaptcha.com"))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn verification_storage_is_limited_to_hcaptcha_embedded_in_discord() {
+		for domain in ["hcaptcha.com", "newassets.hcaptcha.com"] {
+			assert!(verification_storage_domains(
+				Some("discord.com"),
+				Some(domain)
+			));
+		}
+		for domain in [
+			None,
+			Some("evil.test"),
+			Some("hcaptcha.com.evil.test"),
+			Some("evilhcaptcha.com"),
+		] {
+			assert!(!verification_storage_domains(Some("discord.com"), domain));
+		}
+		for domain in [None, Some("evil.test"), Some("discord.com.evil.test")] {
+			assert!(!verification_storage_domains(domain, Some("hcaptcha.com")));
+		}
+	}
 
 	#[test]
 	fn handoff_is_scoped_bounded_single_use_and_closed_before_late_results() {

@@ -14,8 +14,13 @@ storage disabled. Normal TLS validation remains enabled. Scripts run at document
 in the top Discord frame. Navigation permits HTTPS hcaptcha.com and its subdomains on
 port 443 for embedded challenges, using the same origin validation as invite verification.
 The main-document response and candidate origin checks still restrict login to
-https://discord.com. Popups, downloads, file choosers, permission requests, HTTP-auth,
-notifications and printing are denied; embedded challenge availability remains unverified.
+https://discord.com. Website-data access requests are allowed only for hcaptcha.com
+or its subdomains embedded in discord.com, while the main page is still Discord.
+This uses the existing ephemeral session and does not enable persistent storage.
+It removes a possible challenge-state blocker; live acceptance and the reported Linux
+QR/CAPTCHA loop remain unverified. Popups, downloads, file choosers, other permission
+requests, HTTP-auth, notifications and printing are denied; embedded challenge
+availability remains unverified.
 
 WebKit6 script-message callbacks lack trusted sender-frame metadata. The callback accepts
 only a boolean wake signal. A protected main-frame closure retains one ASCII candidate of at
