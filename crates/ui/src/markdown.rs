@@ -15,9 +15,14 @@ const MAX_SPOILERS: u8 = 32;
 struct Style {
 	strong: bool,
 	italic: bool,
+	underline: bool,
 	code: bool,
 	strike: bool,
 	quote: bool,
+	/// Discord heading level 1–3; zero for body text.
+	heading: u8,
+	/// Discord `-# ` subtext: smaller, quieter body text.
+	small: bool,
 	link: Option<usize>,
 	mention: Option<Id>,
 	channel: Option<Id>,
@@ -217,6 +222,18 @@ impl Formatted {
 		// link boundaries may start or end inside a concealed region.
 		let mut open_spoiler: Option<(usize, u8)> = None;
 		let mut regions = 0;
+		// Discord semantics that CommonMark lacks: `>>> ` quotes the rest of the message,
+		// `> ` quotes exactly one line, `-# ` marks one line as subtext, and blank lines
+		// between blocks are kept instead of collapsed.
+		let mut quote_all = false;
+		let mut quote_lazy = false;
+		let mut subtext = false;
+		let mut block_end = 0;
+		let mut lists: Vec<Option<u64>> = Vec::new();
+		let line_prefix = |at: usize| -> &str {
+			let line_start = input[..at].rfind('\n').map_or(0, |i| i + 1);
+			&input[line_start..at]
+		};
 		let literal = |text: &str, range: &std::ops::Range<usize>| {
 			text == &input[range.clone()]
 				&& input[..range.start]
@@ -254,19 +271,90 @@ impl Formatted {
 				return Self::limited_literal(input, source.contains("||"));
 			}
 			style.spoiler = open_spoiler.map(|(_, region)| region);
+			if quote_all {
+				style.quote = true;
+			} else if quote_lazy {
+				style.quote = false;
+			}
+			style.small = subtext;
+			if matches!(
+				event,
+				Event::Start(
+					Tag::Paragraph
+						| Tag::Heading { .. }
+						| Tag::CodeBlock(_)
+						| Tag::BlockQuote(_)
+						| Tag::List(_) | Tag::Item
+				) | Event::Rule
+			) {
+				// Source blank lines between blocks are kept. A block whose range excludes its
+				// own line terminator (fenced code) contributes one newline that is not blank.
+				if range.start > block_end && !output.spans.is_empty() {
+					let mut blank = input[block_end..range.start].matches('\n').count();
+					if blank > 0 && !input[..block_end].ends_with('\n') {
+						blank -= 1;
+					}
+					for _ in 0..blank {
+						output.push("\n", Style::default());
+					}
+				}
+				block_end = block_end.max(range.start);
+			}
 			match event {
 				Event::Start(tag) => {
 					stack.push(style);
 					match tag {
-						Tag::Strong | Tag::Heading { .. } => style.strong = true,
+						Tag::Strong if input[range.start..].starts_with("__") => {
+							style.underline = true;
+						}
+						Tag::Strong => style.strong = true,
+						Tag::Heading { level, .. } => {
+							let level = level as u8;
+							if style.quote && output.line_start() {
+								output.push("│ ", style);
+							}
+							if level <= 3 {
+								style.strong = true;
+								style.heading = level;
+							} else {
+								// Discord has three heading levels; deeper markers stay literal.
+								output.push(&"#".repeat(usize::from(level)), style);
+								output.push(" ", style);
+							}
+						}
 						Tag::Emphasis => style.italic = true,
 						Tag::Strikethrough => style.strike = true,
-						Tag::CodeBlock(_) => style.code = true,
-						Tag::BlockQuote(_) => {
-							output.push("│ ", style);
-							style.quote = true;
+						Tag::CodeBlock(_) => {
+							if style.quote && output.line_start() {
+								output.push("│ ", style);
+							}
+							style.code = true;
 						}
-						Tag::Item => output.push("• ", style),
+						Tag::Paragraph => {
+							if style.quote && output.line_start() {
+								output.push("│ ", style);
+							}
+						}
+						Tag::BlockQuote(_) => {
+							style.quote = true;
+							if input[range.start..].starts_with(">>>") {
+								quote_all = true;
+							}
+						}
+						Tag::List(start) => lists.push(start),
+						Tag::Item => {
+							if style.quote && output.line_start() {
+								output.push("│ ", style);
+							}
+							output.push(&"  ".repeat(lists.len().saturating_sub(1)), style);
+							match lists.last_mut() {
+								Some(Some(number)) => {
+									output.push(&format!("{number}. "), style);
+									*number = number.saturating_add(1);
+								}
+								_ => output.push("• ", style),
+							}
+						}
 						Tag::Link { dest_url, .. } => {
 							style.no_autolink = true;
 							style.link = output.add_link(&dest_url);
@@ -284,20 +372,51 @@ impl Formatted {
 						| TagEnd::Heading(_)
 						| TagEnd::CodeBlock
 						| TagEnd::BlockQuote(_)
-						| TagEnd::Item => output.push("\n", style),
+						| TagEnd::Item => {
+							// Fenced code text carries its own terminator and a quote's inner
+							// blocks end their lines; neither may add a blank line.
+							if !(matches!(tag, TagEnd::CodeBlock | TagEnd::BlockQuote(_))
+								&& output.line_start())
+							{
+								output.push("\n", style);
+							}
+							subtext = false;
+							block_end = block_end.max(range.end);
+						}
+						TagEnd::List(_) => {
+							lists.pop();
+							block_end = block_end.max(range.end);
+						}
 						TagEnd::Image => output.push("]", style),
 						_ => {}
+					}
+					if matches!(tag, TagEnd::BlockQuote(_)) {
+						quote_lazy = false;
 					}
 					style = stack.pop().unwrap_or_default();
 				}
 				Event::Text(text) => {
-					if style.code || text.as_ref() != &input[range.clone()] {
-						output.push(&text, style);
+					let mut range = range;
+					let mut text: &str = &text;
+					if !style.code
+						&& text.starts_with("-# ")
+						&& literal(text, &range)
+						&& line_prefix(range.start)
+							.chars()
+							.all(|c| c == '>' || c == ' ')
+					{
+						subtext = true;
+						style.small = true;
+						text = &text[3..];
+						range.start += 3;
+					}
+					if style.code || text != &input[range.clone()] {
+						output.push(text, style);
 					} else {
 						// A raw-equal Text event can begin with one escaped character
 						// followed by ordinary source text. Keep that first character
 						// inert without suppressing later literal spoiler delimiters.
-						let escaped = if literal(&text, &range) {
+						let escaped = if literal(text, &range) {
 							0
 						} else {
 							text.chars().next().map_or(0, char::len_utf8)
@@ -338,7 +457,23 @@ impl Formatted {
 						..style
 					},
 				),
-				Event::SoftBreak | Event::HardBreak => output.push("\n", style),
+				Event::SoftBreak | Event::HardBreak => {
+					subtext = false;
+					if style.quote && !quote_all && !quote_lazy {
+						// A `> ` quote covers one line; CommonMark's lazy continuation does not.
+						let next = input[range.end..].trim_start_matches(' ');
+						if next.starts_with('>') {
+							output.push("\n│ ", style);
+						} else {
+							quote_lazy = true;
+							output.push("\n", style);
+						}
+					} else if style.quote {
+						output.push("\n│ ", style);
+					} else {
+						output.push("\n", style);
+					}
+				}
 				Event::Rule => output.push("────────\n", style),
 				_ => {}
 			}
@@ -913,6 +1048,13 @@ impl Formatted {
 			self.spans.push((text.to_owned(), style));
 		}
 	}
+	fn line_start(&self) -> bool {
+		self.spans
+			.iter()
+			.rev()
+			.find(|(text, _)| !text.is_empty())
+			.is_none_or(|(text, _)| text.ends_with('\n'))
+	}
 	pub fn bytes(&self) -> usize {
 		self.spans.capacity() * size_of::<(String, Style)>()
 			+ self.spans.iter().map(|(s, _)| s.capacity()).sum::<usize>()
@@ -926,17 +1068,28 @@ impl Formatted {
 			visuals.hyperlink_color
 		} else if style.strong {
 			visuals.strong_text_color()
-		} else if style.quote {
+		} else if style.quote || style.small {
 			visuals.weak_text_color()
 		} else {
 			visuals.text_color()
 		};
+		// Discord proportions: h1 1.5×, h2 1.25×, h3 1× (bold), subtext 0.8× body.
+		let size = body.size
+			* match style.heading {
+				1 => 1.5,
+				2 => 1.25,
+				_ if style.small => 0.8,
+				_ => 1.0,
+			};
 		TextFormat {
 			valign: ui.text_valign(),
 			font_id: if style.code {
-				FontId::monospace(body.size)
+				FontId::monospace(size)
+			} else if style.strong {
+				// egui has no synthetic bold: emphasis comes from the bundled heavier face.
+				FontId::new(size, crate::design::semibold_family(ui.ctx()))
 			} else {
-				body
+				FontId::new(size, body.family)
 			},
 			color,
 			background: if style.code {
@@ -950,7 +1103,7 @@ impl Formatted {
 			} else {
 				Stroke::NONE
 			},
-			underline: if style.link.is_some() {
+			underline: if style.link.is_some() || style.underline {
 				Stroke::new(1.0, color)
 			} else {
 				Stroke::NONE
@@ -969,7 +1122,17 @@ mod tests {
 			("Hello", "Hello"),
 			("**Hello**", "Hello"),
 			("One\nTwo", "One\nTwo"),
-			("One\n\nTwo", "One\nTwo"),
+			("One\n\nTwo", "One\n\nTwo"),
+			("One\n\n\nTwo", "One\n\n\nTwo"),
+			("text\n```\ncode\n```\n\nend", "text\ncode\n\nend"),
+			("# Title\nbody", "Title\nbody"),
+			("- a\n- b", "• a\n• b"),
+			("1. a\n2. b", "1. a\n2. b"),
+			("> quoted\nplain", "│ quoted\nplain"),
+			("> one\n> two", "│ one\n│ two"),
+			(">>> all\nof\n\nthis", "│ all\n│ of\n\n│ this"),
+			("-# small print", "small print"),
+			("#### deep", "#### deep"),
 			("```\none\ntwo\n```", "one\ntwo"),
 			("[Link](https://example.org)", "Link"),
 			("||Hidden||", "Hidden"),
