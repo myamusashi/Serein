@@ -119,7 +119,7 @@ impl Page {
 			}
 			Self::Storage => "data privacy local storage clear cache drafts credentials",
 			Self::Updates => {
-				"updates auto update release channel production stable nightly download restart version check"
+				"updates auto update release channel production stable nightly download restart version check diagnostics issue bug system info debug"
 			}
 			Self::Keybinds => {
 				"system keybinds keyboard shortcuts custom default formatting navigation"
@@ -415,6 +415,27 @@ impl MessagingUi {
 						.size(11.0)
 						.color(colors.muted),
 				);
+				ui.add_space(2.0);
+				let copied = self
+					.updates
+					.copied_diagnostics
+					.is_some_and(|until| ui.input(|i| i.time) < until);
+				let link_text = if copied {
+					RichText::new("✓ Copied issue info")
+						.size(11.0)
+						.color(colors.positive)
+				} else {
+					RichText::new("Copy issue info")
+						.size(11.0)
+						.color(colors.muted)
+				};
+				if ui
+					.link(link_text)
+					.on_hover_text("Copy environment information formatted for GitHub issues")
+					.clicked()
+				{
+					self.copy_diagnostic_info(ui.ctx());
+				}
 			});
 	}
 

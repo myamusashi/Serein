@@ -13,6 +13,7 @@ pub struct Updates {
 	pub check_requested: bool,
 	pub download_requested: bool,
 	pub restart_requested: bool,
+	pub copied_diagnostics: Option<f64>,
 }
 impl Default for Updates {
 	fn default() -> Self {
@@ -28,10 +29,58 @@ impl Default for Updates {
 			check_requested: false,
 			download_requested: false,
 			restart_requested: false,
+			copied_diagnostics: None,
 		}
 	}
 }
 impl MessagingUi {
+	/// Formats system and client environment details for GitHub issue reports.
+	pub fn diagnostic_info(&self, ctx: &egui::Context) -> String {
+		let os = std::env::consts::OS;
+		let arch = std::env::consts::ARCH;
+		let channel = match self.build.channel {
+			design::Channel::Stable => "Stable",
+			design::Channel::Nightly => "Nightly",
+			design::Channel::Dev => "Dev",
+		};
+		let theme_mode = match ctx.theme() {
+			egui::Theme::Dark => "Dark",
+			egui::Theme::Light => "Light",
+		};
+		let theme_variant = design::variant().label();
+		let scale = ctx.pixels_per_point();
+		let update_channel = if self.updates.nightly {
+			"Nightly"
+		} else {
+			"Production"
+		};
+
+		#[cfg(target_os = "linux")]
+		let session_type = std::env::var("XDG_SESSION_TYPE")
+			.map(|s| format!(" ({s})"))
+			.unwrap_or_default();
+		#[cfg(not(target_os = "linux"))]
+		let session_type = "";
+
+		format!(
+			"- **Serein Version:** {} ({channel})\n- **Operating System:** {os} ({arch}){session_type}\n- **Display Scale:** {scale:.2}\n- **Theme:** {theme_mode} ({theme_variant})\n- **Update Channel:** {update_channel}\n- **Auto Update:** {}",
+			self.build.version,
+			if self.updates.auto_update {
+				"Enabled"
+			} else {
+				"Disabled"
+			}
+		)
+	}
+
+	/// Copies formatted diagnostics to clipboard and sets a temporary feedback countdown.
+	pub fn copy_diagnostic_info(&mut self, ctx: &egui::Context) {
+		let info = self.diagnostic_info(ctx);
+		ctx.copy_text(info);
+		self.updates.copied_diagnostics = Some(ctx.input(|i| i.time) + 2.5);
+		ctx.request_repaint_after(std::time::Duration::from_secs(3));
+	}
+
 	/// Update controls for the signed-out header, rendered inside its menu popup so the
 	/// screen never grows a second, movable window.
 	pub fn updates_menu(&mut self, ui: &mut egui::Ui, demo: bool) {
@@ -118,6 +167,28 @@ impl MessagingUi {
 			ui.weak("Offline preview. Update actions are simulated and preferences are not saved.");
 		} else if !self.updates.supported {
 			ui.weak("In-app installation requires a supported macOS or Windows release package. Source builds and Linux installations must be updated manually.");
+		}
+		ui.add_space(16.0);
+		ui.separator();
+		ui.add_space(12.0);
+		ui.label(design::eyebrow(ui, "Support & Diagnostics", colors.muted));
+		ui.weak("Copy system and client environment details formatted for GitHub issue reports.");
+		ui.add_space(6.0);
+		let copied = self
+			.updates
+			.copied_diagnostics
+			.is_some_and(|until| ui.input(|i| i.time) < until);
+		let button_text = if copied {
+			"✓ Copied to clipboard!"
+		} else {
+			"Copy issue diagnostics"
+		};
+		if ui
+			.button(button_text)
+			.on_hover_text("Copy environment information formatted for GitHub issues")
+			.clicked()
+		{
+			self.copy_diagnostic_info(ui.ctx());
 		}
 	}
 }
