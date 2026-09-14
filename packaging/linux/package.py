@@ -299,6 +299,9 @@ def arch_package(temporary, stage, application_version, libraries):
     for path in re.findall(r"(?:=>\s+|^\s*)(/\S+)", libraries, re.MULTILINE):
         owner = output("pacman", "-Qqo", path)
         name, installed_version = output("pacman", "-Q", owner).split()
+        if name in {"zlib", "zlib-ng-compat"} or Path(path).name.startswith("libz.so"):
+            depends.add("libz.so")
+            continue
         depends.add(f"{name}>={installed_version}")
     if any(not re.fullmatch(r"[A-Za-z0-9@._+:>=-]+", item) for item in depends):
         raise ValueError("Invalid native Arch dependency metadata")
