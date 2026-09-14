@@ -26,6 +26,8 @@ def build(root, version):
     runtime = tools / "runtime-x86_64"
     if not appimagetool.is_file() or not runtime.is_file():
         raise ValueError("Run bash packaging/appimage/install-tools.sh first")
+    if not shutil.which("file"):
+        raise ValueError("The 'file' command is required by appimagetool but was not found in PATH")
     libraries = subprocess.check_output(["ldd", str(root / "serein")], text=True)
     if "not found" in libraries:
         raise ValueError(f"Missing host runtime libraries:\n{libraries}")

@@ -35,7 +35,7 @@ Pre-compiled releases for macOS, Linux, and Windows are published on GitHub [Rel
 |---|---|---|---|
 | **Windows** | `-Setup.exe`, `.zip` | `x86_64` | Per-user NSIS installer (recommended) or standalone portable archive |
 | **macOS** | Homebrew Cask, `.zip` | Apple Silicon (`aarch64`) | Signed and notarized `.app` bundle |
-| **Linux** | Flatpak (`.flatpakref`, `.flatpak`), `.AppImage`, `.deb`, `.rpm`, `.pkg.tar.zst` | `x86_64` | Flatpak with automatic updates (recommended); AppImage and distribution packages |
+| **Linux** | Flatpak (recommended), Repositories (`apt`, `dnf`, `zypper`, `pacman`), `.AppImage` | `x86_64` | Flatpak with automatic updates; signed package repositories; portable AppImage |
 
 ---
 
@@ -82,52 +82,57 @@ Download `serein-<version>-macOS-ARM64.zip` from [Releases](https://github.com/V
 
 ### Linux
 
-#### Flatpak (Recommended)
+#### 1. Flatpak (Recommended)
 
-Flatpak is the primary distribution format for Linux, providing sandbox isolation, bundled GNOME/WebKit runtimes, and automatic background updates.
+Flatpak is the recommended distribution format for Linux, featuring sandbox isolation, bundled GNOME/WebKit runtimes, and automatic background updates.
 
-##### 1. One-Click Repository Install (Automatic Updates)
-Install via the Serein Flatpak reference file:
-```sh
-flatpak install --user https://viceverse-cz.github.io/Serein/flatpak/serein.flatpakref
-# Or using the downloaded file from Releases:
-# flatpak install --user ./serein.flatpakref
-```
-Once installed, your desktop environment (GNOME Software, KDE Discover) and `flatpak update` will automatically discover and install new updates.
+- **One-Click Repository Install (Automatic Updates)**:
+  ```sh
+  flatpak install --user https://viceverse-cz.github.io/Serein/flatpak/serein.flatpakref
+  ```
+  Once installed, your desktop software store (GNOME Software, KDE Discover) or `flatpak update` will automatically discover and install updates.
 
-##### 2. Standalone Flatpak Bundle (Offline Install)
-Download `Serein-linux.flatpak` from [Releases](https://github.com/ViceVerse-cz/rustcord/releases):
-```sh
-flatpak install --user ./Serein-linux.flatpak
-flatpak run org.serein.desktop
-```
+- **Standalone Offline Bundle**:
+  Download `Serein-linux.flatpak` from [Releases](https://github.com/ViceVerse-cz/rustcord/releases):
+  ```sh
+  flatpak install --user ./Serein-linux.flatpak
+  flatpak run org.serein.desktop
+  ```
 
-See [Flatpak build and runtime guide](packaging/flatpak/README.md) for sandbox permissions and building from source.
+See [Flatpak guide](packaging/flatpak/README.md) for sandbox permissions and source build details.
 
-#### AppImage
+#### 2. Native Package Repositories (apt, dnf, zypper, pacman)
 
-Download `serein-<version>-Linux-X64.AppImage`, make it executable with
-`chmod +x ./serein-<version>-Linux-X64.AppImage`, then launch it. Keep it in a
-writable directory to use Settings → Updates for in-app downloads and restart
-installation. The image uses host GTK4/WebKitGTK 6.0 and other native libraries;
-release builds target Ubuntu 26.04 x86_64. See [AppImage setup and runtime
-dependencies](packaging/appimage/README.md) before running it.
-
-#### Native Package Repositories (apt, dnf, zypper, pacman)
-
-Run the automatic setup script to detect your distribution, verify the GPG signing key fingerprint, configure the signed repository, and optionally install `serein`:
+Configure the signed package repository for your distribution with one command:
 ```sh
 curl -fsSL https://viceverse-cz.github.io/Serein/setup.sh | sh
 ```
-Your native package manager will keep Serein automatically updated alongside the rest of your system:
-```sh
-# Ubuntu / Debian: sudo apt install serein
-# Fedora:          sudo dnf install serein
-# openSUSE:        sudo zypper install serein
-# Arch Linux:      sudo pacman -S serein
-```
+The script detects your distribution (Ubuntu/Debian, Fedora, openSUSE, Arch Linux), cryptographically verifies the GPG signing key, and configures the repository with an option to install immediately.
 
-See [Linux installation and builds](packaging/linux/README.md) for distribution build instructions, and [Signed package repositories](packaging/repositories/README.md) for manual repository setup and GPG verification details.
+After setup, manage Serein with your native package manager:
+```sh
+# Ubuntu / Debian
+sudo apt install serein
+
+# Fedora
+sudo dnf install serein
+
+# openSUSE
+sudo zypper install serein
+
+# Arch Linux
+sudo pacman -S serein
+```
+Your normal system updates (`apt upgrade`, `dnf upgrade`, `zypper update`, `pacman -Syu`) will keep Serein updated. See [Signed package repositories](packaging/repositories/README.md) for manual GPG verification steps.
+
+#### 3. Standalone AppImage (Portable)
+
+Download `serein-<version>-Linux-X64.AppImage` from [Releases](https://github.com/ViceVerse-cz/rustcord/releases), make it executable, and run:
+```sh
+chmod +x ./serein-*-Linux-X64.AppImage
+./serein-*-Linux-X64.AppImage
+```
+Keep the AppImage in a writable directory to receive in-app updates via **Settings → Updates**. Note that the AppImage uses host GTK4 and WebKitGTK 6.0 libraries; see [AppImage setup and runtime dependencies](packaging/appimage/README.md) for host requirements.
 
 ---
 
