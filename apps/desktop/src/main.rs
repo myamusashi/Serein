@@ -3827,7 +3827,7 @@ impl eframe::App for Desktop {
 			if paste.generation == self.state.generation
 				&& Some(paste.channel) == self.state.selected
 				&& self.state.user.is_some()
-				&& !self.messaging.has_edit()
+				&& !self.messaging.has_edit_in(self.state.selected)
 			{
 				match result {
 					Ok(clipboard::Content::Text(text)) => {
@@ -3877,7 +3877,7 @@ impl eframe::App for Desktop {
 				&& self.login.is_none()
 				&& !self.confirming_close
 				&& !self.confirming_logout
-				&& !self.messaging.has_edit()
+				&& !self.messaging.has_edit_in(self.state.selected)
 				&& !self.downloads.is_active()
 				&& let Some(channel) = self.state.selected
 			{

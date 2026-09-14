@@ -568,6 +568,11 @@ impl MessagingUi {
 	pub fn has_edit(&self) -> bool {
 		self.editing.is_some()
 	}
+	pub fn has_edit_in(&self, channel: Option<Id>) -> bool {
+		self.editing
+			.as_ref()
+			.is_some_and(|(edit_channel, _, _)| Some(*edit_channel) == channel)
+	}
 	pub fn messages_deleted(&mut self, ctx: &egui::Context, channel: Id, ids: &[Id]) {
 		if ids.len() > 100 {
 			return;
