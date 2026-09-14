@@ -756,6 +756,21 @@ impl Formatted {
 							if response.clicked() {
 								*channel = Some(id);
 							}
+						} else if channels.iter().all(|target| target.id != id) {
+							let label = "#unknown-channel";
+							let response = ui
+								.add(egui::Link::new(egui::RichText::new(label).strong()))
+								.on_hover_text("Load channel");
+							response.widget_info(|| {
+								egui::WidgetInfo::labeled(
+									egui::WidgetType::Link,
+									ui.is_enabled(),
+									"Unknown channel, load channel",
+								)
+							});
+							if response.clicked() {
+								*channel = Some(id);
+							}
 						} else {
 							ui.add(egui::Label::new(&self.spans[start].0).selectable(true))
 								.on_hover_text(
@@ -1675,7 +1690,7 @@ mod tests {
 	}
 
 	#[test]
-	fn channel_references_keep_literals_bounded_and_activate_only_loaded_text_channels() {
+	fn channel_references_keep_literals_bounded_and_offer_missing_channels() {
 		let parsed = Formatted::parse(
 			"**<#42>** `<#43>` \\<#44> &lt;#45&gt; [<#46>](https://example.com) <#0>\n\n```\n<#47>\n```",
 		);
@@ -1778,7 +1793,7 @@ mod tests {
 				assert!(output.platform_output.commands.is_empty());
 				output.textures_delta.clear();
 			}
-			assert_eq!(channel, (id == 4).then_some(Id(4)));
+			assert_eq!(channel, matches!(id, 4 | 5).then_some(Id(id)));
 			assert!(opening.is_none() && profile.is_none());
 		}
 	}
