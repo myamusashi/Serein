@@ -661,10 +661,8 @@ impl TimelineView {
 		let changed = self.revision != state.revision || dimensions_changed;
 		let mut offset = None;
 		if changed {
-			if dimensions_changed {
-				self.heights.clear();
-				self.pending_heights.clear();
-			}
+			// Keep measured heights as estimates during resize. Visible rows are
+			// remeasured below; resetting everything makes the scroll extent jump.
 			self.width = width;
 			self.text_size = text_size;
 			self.scale = scale;
@@ -1684,9 +1682,7 @@ impl TimelineView {
 				});
 				let measured = response.response.rect.height();
 				if (measured - height).abs() > 1.0 {
-					if !dimensions_changed {
-						ui.ctx().request_discard("Pending message height settled");
-					}
+					ui.ctx().request_discard("Pending message height settled");
 					ui.ctx().request_repaint();
 				}
 				self.pending_heights.insert(pending.nonce.clone(), measured);
@@ -1797,11 +1793,8 @@ impl TimelineView {
 			self.revision = u64::MAX;
 			if self.following {
 				self.jump = true;
-				// Resizing invalidates heights each frame; settle on the queued repaint
-				// instead of paying for an extra layout pass throughout the drag.
-				if !dimensions_changed {
-					ui.ctx().request_discard("Timeline message heights settled");
-				}
+				// Settle the bottom position before presenting a resized frame too.
+				ui.ctx().request_discard("Timeline message heights settled");
 			}
 			ui.ctx().request_repaint();
 		}
