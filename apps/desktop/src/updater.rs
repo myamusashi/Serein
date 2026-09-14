@@ -37,8 +37,10 @@ struct Release {
 #[derive(Clone)]
 struct Package {
 	version: String,
-	archive: Asset,
-	checksums: Asset,
+	// `None` on a platform with no in-app installer (Linux): the version is still reported,
+	// but there is nothing here to download.
+	archive: Option<Asset>,
+	checksums: Option<Asset>,
 }
 struct Staged {
 	directory: PathBuf,
@@ -134,9 +136,11 @@ impl Updater {
 			view.supported = true;
 			return false;
 		}
+		// Linux still checks and reports a newer version; it just has nothing to download
+		// in-app (see `asset_name`), so every download/install path below stays `supported`-gated.
 		let supported = cfg!(any(target_os = "macos", windows));
 		view.supported = supported;
-		if !enabled || !supported {
+		if !enabled {
 			if let Some(job) = &self.job {
 				job.cancel.store(true, Ordering::Relaxed);
 			}
@@ -144,12 +148,8 @@ impl Updater {
 			view.available = false;
 			view.ready = false;
 			view.progress = None;
-			view.status = if supported {
-				"Load update preferences or choose your update settings to enable checking."
-			} else {
-				"Use your package manager to update Serein on Linux."
-			}
-			.into();
+			view.status =
+				"Load update preferences or choose your update settings to enable checking.".into();
 			return false;
 		}
 		if self.channel != Some(view.nightly) {
@@ -254,12 +254,17 @@ impl Updater {
 					Ok(Outcome::Prepared(helper))
 				});
 				self.status = "Preparing to restart…".into();
-			} else if (download || (view.auto_update && self.auto_download))
+			} else if supported
+				&& (download || (view.auto_update && self.auto_download))
 				&& self.package.is_some()
 				&& self.staged.is_none()
 			{
 				let package = self.package.as_ref().expect("checked package").clone();
-				let total = package.archive.size;
+				let total = package
+					.archive
+					.as_ref()
+					.expect("a supported platform's checked package has a downloadable archive")
+					.size;
 				self.auto_download = false;
 				self.status = format!("Downloading Serein {}…", package.version);
 				self.start(runtime, ctx, total, move |cancel, progress| {
@@ -525,8 +530,15 @@ fn select_release(
 	if release.assets.len() > 32 {
 		return Err("The release contains too many assets.".into());
 	}
-	let wanted =
-		asset_name(&release.tag_name).ok_or("In-app updates are unavailable for this platform.")?;
+	// No in-app installer on this platform (Linux): still report the newer version so the
+	// UI can show it, but there is no asset to look up or download.
+	let Some(wanted) = asset_name(&release.tag_name) else {
+		return Ok(Some(Package {
+			version: version.to_string(),
+			archive: None,
+			checksums: None,
+		}));
+	};
 	let find = |name: &str| -> Result<Asset, String> {
 		let mut found = release.assets.iter().filter(|asset| asset.name == name);
 		let asset = found
@@ -555,8 +567,8 @@ fn select_release(
 	}
 	Ok(Some(Package {
 		version: version.to_string(),
-		archive,
-		checksums,
+		archive: Some(archive),
+		checksums: Some(checksums),
 	}))
 }
 async fn check_release(nightly: bool, cancel: Arc<AtomicBool>) -> Result<Option<Package>, String> {
@@ -614,16 +626,18 @@ async fn download_package(
 	cancel: Arc<AtomicBool>,
 	progress: Arc<AtomicU64>,
 ) -> Result<Outcome, String> {
+	// Only reachable on a platform with an in-app installer; `select_release` only omits
+	// these when there is nothing to download, and that path never reaches this function.
+	let archive = package
+		.archive
+		.ok_or("This platform cannot install updates in-app.")?;
+	let checksums = package
+		.checksums
+		.ok_or("This platform cannot install updates in-app.")?;
 	let client = client()?;
 	let expected = checksum(
-		&bounded_body(
-			&client,
-			&package.checksums.browser_download_url,
-			64 * 1024,
-			&cancel,
-		)
-		.await?,
-		&package.archive.name,
+		&bounded_body(&client, &checksums.browser_download_url, 64 * 1024, &cancel).await?,
+		&archive.name,
 	)?;
 	let stage = tokio::task::spawn_blocking(install::create_stage)
 		.await
@@ -631,10 +645,10 @@ async fn download_package(
 	let directory = stage.directory.clone();
 	let result = async {
 		use tokio::io::AsyncWriteExt;
-		let mut response = response(&client, &package.archive.browser_download_url).await?;
+		let mut response = response(&client, &archive.browser_download_url).await?;
 		if response
 			.content_length()
-			.is_some_and(|size| size != package.archive.size)
+			.is_some_and(|size| size != archive.size)
 		{
 			return Err("The package size does not match its release metadata.".into());
 		}
@@ -657,7 +671,7 @@ async fn download_package(
 			received = received
 				.checked_add(chunk.len() as u64)
 				.ok_or("Update size overflow.")?;
-			if received > package.archive.size || received > MAX_DOWNLOAD {
+			if received > archive.size || received > MAX_DOWNLOAD {
 				return Err("The downloaded package exceeds its size limit.".into());
 			}
 			file.write_all(&chunk).await.map_err(|_| {
@@ -666,7 +680,7 @@ async fn download_package(
 			hasher.update(&chunk);
 			progress.store(received, Ordering::Relaxed);
 		}
-		if received != package.archive.size || hasher.finalize().as_slice() != expected {
+		if received != archive.size || hasher.finalize().as_slice() != expected {
 			return Err(
 				"The update checksum or length did not match. Nothing was installed.".into(),
 			);
