@@ -652,15 +652,20 @@ impl TimelineView {
 			labels_changed = self.channel_labels != labels;
 			self.channel_labels = labels;
 		}
-		let dimensions_changed = (self.width - width).abs() > 1.0
-			|| self.text_size != text_size
+		let width_changed = (self.width - width).abs() > 1.0;
+		let content_dimensions_changed = self.text_size != text_size
 			|| self.scale != scale
 			|| labels_changed
 			|| self.hide_media_links != self.applied_hide_media_links;
+		let dimensions_changed = width_changed || content_dimensions_changed;
 		self.applied_hide_media_links = self.hide_media_links;
 		let changed = self.revision != state.revision || dimensions_changed;
 		let mut offset = None;
 		if changed {
+			if content_dimensions_changed {
+				self.heights.clear();
+				self.pending_heights.clear();
+			}
 			// Keep measured heights as estimates during resize. Visible rows are
 			// remeasured below; resetting everything makes the scroll extent jump.
 			self.width = width;
@@ -1793,8 +1798,9 @@ impl TimelineView {
 			self.revision = u64::MAX;
 			if self.following {
 				self.jump = true;
-				// Settle the bottom position before presenting a resized frame too.
-				ui.ctx().request_discard("Timeline message heights settled");
+				if !dimensions_changed {
+					ui.ctx().request_discard("Timeline message heights settled");
+				}
 			}
 			ui.ctx().request_repaint();
 		}
