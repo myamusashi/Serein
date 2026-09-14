@@ -124,6 +124,9 @@ impl LoginView {
 	pub fn expired(&self) -> bool {
 		self.opened.elapsed() > Duration::from_secs(600)
 	}
+	pub fn crashed(&self) -> bool {
+		false
+	}
 	pub fn resize(&self, parent: &winit::window::Window) {
 		let _ = self.view.set_bounds(bounds(parent));
 	}

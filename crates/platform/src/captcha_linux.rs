@@ -101,6 +101,8 @@ impl CaptchaView {
 		settings.set_javascript_can_access_clipboard(false);
 		settings.set_enable_media_stream(false);
 		settings.set_enable_webrtc(false);
+		settings.set_enable_media(false);
+		settings.set_enable_webaudio(false);
 		let manager = webkit6::UserContentManager::new();
 		manager.add_script(&webkit6::UserScript::new(
 			&script,
