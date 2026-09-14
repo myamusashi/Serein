@@ -757,30 +757,26 @@ impl State {
 						Action::Mute { channel, muted } => self.confirm_dm_muted(channel, muted)?,
 					}
 				}
-				self.user_actions.status = Some(if observed {
-					"Request completed · latest service settings shown"
-				} else {
-					match action {
-						Action::LoadNote(_) => "Note loaded",
-						Action::Note { .. } => "Note saved",
-						Action::Nickname { .. } => "Nickname saved",
-						Action::AddFriend { .. } => {
-							"Friend request sent · waiting for service update"
-						}
-						Action::ProfileFriend { friend: true, .. } => "Friend request sent",
-						Action::ProfileFriend { friend: false, .. } => "Friend removed",
-						Action::ResolveFriend { accept: true, .. } => "Friend request accepted",
-						Action::ResolveFriend { accept: false, .. } => "Friend request removed",
-						Action::CloseDm(_) => "DM closed · messages and drafts were not deleted",
-						Action::Block { blocked: true, .. } => "User blocked",
-						Action::Block { blocked: false, .. } => "User unblocked",
-						Action::Mute { muted: true, .. } => {
-							"Conversation notifications muted until you turn them back on"
-						}
-						Action::Mute { muted: false, .. } => "Conversation notifications unmuted",
+				// A change the service already echoed needs no confirmation in the menu.
+				let label = match action {
+					Action::LoadNote(_) => "Note loaded",
+					Action::Note { .. } => "Note saved",
+					Action::Nickname { .. } => "Nickname saved",
+					Action::AddFriend { .. } => "Friend request sent · waiting for service update",
+					Action::ProfileFriend { friend: true, .. } => "Friend request sent",
+					Action::ProfileFriend { friend: false, .. } => "Friend removed",
+					Action::ResolveFriend { accept: true, .. } => "Friend request accepted",
+					Action::ResolveFriend { accept: false, .. } => "Friend request removed",
+					Action::CloseDm(_) => "DM closed · messages and drafts were not deleted",
+					Action::Block { blocked: true, .. } => "User blocked",
+					Action::Block { blocked: false, .. } => "User unblocked",
+					Action::Mute { muted: true, .. } => {
+						"Conversation notifications muted until you turn them back on"
 					}
-				});
-				self.status = self.user_actions.status.unwrap();
+					Action::Mute { muted: false, .. } => "Conversation notifications unmuted",
+				};
+				self.user_actions.status = (!observed).then_some(label);
+				self.status = label;
 			}
 		}
 		Ok(())
@@ -1330,10 +1326,9 @@ mod tests {
 			.unwrap();
 		finish(&mut state, unmute, Ok(()));
 		assert_eq!(state.dm_muted(Id(10)), Some(true));
-		assert_eq!(
-			state.status,
-			"Request completed · latest service settings shown"
-		);
+		// The service already answered, so menus show no completion note.
+		assert_eq!(state.status, "Conversation notifications unmuted");
+		assert_eq!(state.user_action_status(), None);
 		let unmute = state.set_dm_muted(Id(10), false).unwrap();
 		state
 			.apply_notification_preferences(crate::notifications::Event::Settings {

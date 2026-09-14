@@ -3070,6 +3070,10 @@ impl MessagingUi {
 				Some(profiles::Action::RemoveFriend) => {
 					self.friend_removal = Some((state.generation, user.clone()));
 				}
+				Some(profiles::Action::Menu(action)) => {
+					// Dispatched with the other user menus on the next frame.
+					self.user_action = Some(action);
+				}
 				Some(profiles::Action::Edit) => {
 					self.profile = None;
 					self.profile_link = None;

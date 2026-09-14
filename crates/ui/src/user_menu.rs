@@ -3,7 +3,7 @@ use client_core::{Command, State};
 use model::User;
 
 #[derive(Clone, PartialEq, Eq)]
-pub(super) enum Action {
+pub enum Action {
 	Note(User),
 	Nickname(User),
 	CloseDm(model::Id),
