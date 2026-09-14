@@ -903,6 +903,31 @@ pub fn system_demo_state() -> State {
 	state
 }
 
+/// Fenced code blocks in every Discord shape: language header, one-line fence, bare fence,
+/// unknown language and a closing fence at the end of the last content line.
+pub fn code_demo_state() -> State {
+	let mut state = chat_demo_state();
+	state.timeline.clear();
+	let texts = [
+		"One-liner: ```cargo xtask check``` and an unknown tag:\n```elixir\nIO.puts \"synthetic\"\n```",
+		"```json\n{\"name\": \"serein\", \"version\": 1, \"voice\": true, \"tags\": [\"native\", null]}\n```",
+		"Here is the reducer entry point:\n```rust\n/// Apply one gateway event.\npub fn apply(&mut self, event: Event) -> Result<(), Error> {\n    let Some(channel) = self.channels.get_mut(&event.channel) else {\n        return Err(Error::Unknown(event.channel));\n    };\n    channel.push(event.message, MAX_MESSAGES)?; // bounded\n    Ok(())\n}\n```\nThe cache stays bounded by bytes and items.",
+		"```js\nconst rows = await db.query(\"select id from users where active = $1\", [true]);\nconsole.log(`${rows.length} active`); // synthetic\n```",
+	];
+	for (i, text) in texts.iter().enumerate() {
+		let mut m = message(i as u64 + 1, Id(20));
+		m.id = Id(((1_788_998_100_000u64 + i as u64 * 60_000 - 1_420_070_400_000) << 22) | 1);
+		m.author = message(if i % 2 == 0 { 1 } else { 2 }, Id(20)).author;
+		m.content = (*text).into();
+		m.embeds.clear();
+		m.attachments.clear();
+		m.reactions = Some(vec![]);
+		state.timeline.insert(m, false, false).unwrap();
+	}
+	state.revision += 1;
+	state
+}
+
 /// Offline video attachment. Desktop substitutes its generated MOV fixture only in --demo.
 pub fn video_demo_state() -> State {
 	let mut state = chat_demo_state();

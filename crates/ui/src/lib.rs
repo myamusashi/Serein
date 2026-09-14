@@ -29,6 +29,7 @@ mod forum;
 mod friends;
 mod group_menu;
 mod guild_folders;
+mod highlight;
 pub mod icons;
 mod invites;
 mod local_time;

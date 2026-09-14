@@ -864,6 +864,8 @@ impl Desktop {
 					test_support::friends_demo_state()
 				} else if std::env::args().any(|arg| arg == "--demo-system-messages") {
 					test_support::system_demo_state()
+				} else if std::env::args().any(|arg| arg == "--demo-code") {
+					test_support::code_demo_state()
 				} else if std::env::args().any(|arg| arg == "--demo-notifications") {
 					test_support::notification_demo_state()
 				} else if std::env::args().any(|arg| {

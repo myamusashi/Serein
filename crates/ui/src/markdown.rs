@@ -1,7 +1,7 @@
 //! Bounded native text formatting. No HTML renderer, image loader, or automatic URL access.
 use egui::{FontId, Stroke, TextFormat, text::LayoutJob};
 use model::Id;
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -10,6 +10,7 @@ const MAX_EVENTS: usize = 512;
 const MAX_DEPTH: usize = 16;
 const MAX_LINKS: usize = 16;
 const MAX_SPOILERS: u8 = 32;
+const MAX_BLOCKS: usize = 32;
 
 #[derive(Clone, Copy, Default)]
 struct Style {
@@ -29,9 +30,24 @@ struct Style {
 	channel: Option<Id>,
 	no_autolink: bool,
 	spoiler: Option<u8>,
+	/// Fenced code block index; the block widget replaces these spans when shown.
+	block: Option<u8>,
+}
+/// One fenced block: its display text plus highlighting computed once at parse time.
+pub struct CodeBlock {
+	/// Sanitised fence info word, shown when no known language matches it.
+	tag: String,
+	language: Option<crate::highlight::Language>,
+	/// Exact text for copying.
+	code: String,
+	/// Tab-expanded text when it differs from `code`; egui has no tab stops.
+	display: Option<String>,
+	/// Highlighting of the displayed text, computed once at parse time.
+	segments: Vec<crate::highlight::Segment>,
 }
 pub struct Formatted {
 	spans: Vec<(String, Style)>,
+	blocks: Vec<CodeBlock>,
 	mention_count: usize,
 	pub links: Vec<String>,
 	pub limited: bool,
@@ -200,6 +216,67 @@ pub(super) fn confirm_external_link(
 	}
 }
 
+/// Insert a newline before a closing ``` that ends a line of fenced content and after one that
+/// is followed by more text, so CommonMark sees the fence Discord would. A fence whose opening
+/// line already holds the closing run (` ```one line``` `) is left for the code-span path.
+fn normalize_fences(input: &str) -> std::borrow::Cow<'_, str> {
+	let bytes = input.as_bytes();
+	let mut out: Option<String> = None;
+	let mut open = false;
+	let mut i = 0;
+	let mut copied = 0;
+	while let Some(offset) = input[i..].find("```") {
+		let at = i + offset;
+		let mut run_end = at;
+		while run_end < bytes.len() && bytes[run_end] == b'`' {
+			run_end += 1;
+		}
+		let line_end = input[run_end..]
+			.find('\n')
+			.map_or(input.len(), |n| run_end + n);
+		if !open {
+			if input[run_end..line_end].contains("```") {
+				// Single-line fence pair: skip past the closing run on this line.
+				let close = run_end + input[run_end..line_end].find("```").unwrap_or(0);
+				let mut close_end = close;
+				while close_end < bytes.len() && bytes[close_end] == b'`' {
+					close_end += 1;
+				}
+				i = close_end;
+				continue;
+			}
+			open = true;
+			i = line_end;
+			continue;
+		}
+		let line_start = input[..at].rfind('\n').map_or(0, |n| n + 1);
+		let own_line = input[line_start..at].trim().is_empty();
+		let trailing = input[run_end..line_end].trim().is_empty();
+		if !own_line || !trailing {
+			let out = out.get_or_insert_with(|| String::with_capacity(input.len() + 8));
+			if !own_line {
+				out.push_str(&input[copied..at]);
+				out.push('\n');
+				copied = at;
+			}
+			if !trailing {
+				out.push_str(&input[copied..run_end]);
+				out.push('\n');
+				copied = run_end;
+			}
+		}
+		open = false;
+		i = run_end;
+	}
+	match out {
+		Some(mut out) => {
+			out.push_str(&input[copied..]);
+			std::borrow::Cow::Owned(out)
+		}
+		None => std::borrow::Cow::Borrowed(input),
+	}
+}
+
 impl Formatted {
 	pub fn parse(source: &str) -> Self {
 		let mut end = source.len().min(MAX_INPUT);
@@ -209,9 +286,13 @@ impl Formatted {
 		if let Some((line_end, _)) = source[..end].match_indices('\n').nth(127) {
 			end = line_end;
 		}
-		let input = &source[..end];
+		// Discord closes a fence at the end of any line (` ```js\ncode``` `); CommonMark needs
+		// the closing fence on its own line. Only inserted newlines differ from the source.
+		let normalized = normalize_fences(&source[..end]);
+		let input: &str = &normalized;
 		let mut output = Self {
 			spans: Vec::new(),
+			blocks: Vec::new(),
 			mention_count: 0,
 			links: Vec::new(),
 			limited: end < source.len(),
@@ -325,11 +406,15 @@ impl Formatted {
 						}
 						Tag::Emphasis => style.italic = true,
 						Tag::Strikethrough => style.strike = true,
-						Tag::CodeBlock(_) => {
+						Tag::CodeBlock(CodeBlockKind::Fenced(info)) => {
+							style.code = true;
+							style.block = output.open_block(&info);
+						}
+						// Discord has no indented code blocks: four leading spaces stay prose.
+						Tag::CodeBlock(CodeBlockKind::Indented) => {
 							if style.quote && output.line_start() {
 								output.push("│ ", style);
 							}
-							style.code = true;
 						}
 						Tag::Paragraph => {
 							if style.quote && output.line_start() {
@@ -381,6 +466,9 @@ impl Formatted {
 							{
 								output.push("\n", style);
 							}
+							if let Some(block) = style.block {
+								output.close_block(block);
+							}
 							subtext = false;
 							block_end = block_end.max(range.end);
 						}
@@ -413,6 +501,9 @@ impl Formatted {
 					}
 					if style.code || text != &input[range.clone()] {
 						output.push(text, style);
+						if let Some(block) = style.block {
+							output.blocks[usize::from(block)].code.push_str(text);
+						}
 					} else {
 						// A raw-equal Text event can begin with one escaped character
 						// followed by ordinary source text. Keep that first character
@@ -449,6 +540,20 @@ impl Formatted {
 						}
 					} else {
 						output.push(&text, inert);
+					}
+				}
+				// ` ```code``` ` on one line is a fence to Discord but a code span to CommonMark.
+				Event::Code(text) if input[range.clone()].starts_with("```") => {
+					let block = output.open_block("");
+					let style = Style {
+						code: true,
+						block,
+						..style
+					};
+					output.push(&text, style);
+					if let Some(block) = block {
+						output.blocks[usize::from(block)].code.push_str(&text);
+						output.close_block(block);
 					}
 				}
 				Event::Code(text) => output.push(
@@ -509,6 +614,7 @@ impl Formatted {
 					..Default::default()
 				},
 			)],
+			blocks: Vec::new(),
 			mention_count: 0,
 			links: Vec::new(),
 			limited: true,
@@ -815,17 +921,42 @@ impl Formatted {
 						start += 1;
 						continue;
 					}
+					if let Some(block) = self.spans[start].1.block {
+						let count = self.spans[start..]
+							.iter()
+							.take_while(|(_, style)| style.block == Some(block))
+							.count();
+						Self::show_code_block(ui, &self.blocks[usize::from(block)], block);
+						start += count;
+						continue;
+					}
 					let target = self.spans[start].1.link;
-					let count = self.spans[start..]
-						.iter()
-						.take_while(|(_, style)| {
-							style.link == target
-								&& style.spoiler == spoiler
-								&& style.mention.is_none()
-								&& style.channel.is_none()
-						})
-						.count();
-					let spans = &self.spans[start..start + count];
+					let count =
+						self.spans[start..]
+							.iter()
+							.take_while(|(_, style)| {
+								style.link == target
+									&& style.spoiler == spoiler && style.mention.is_none()
+									&& style.channel.is_none() && style.block.is_none()
+							})
+							.count();
+					// The block widget already breaks the line: a paragraph's trailing newline
+					// before it would otherwise add an empty row.
+					let trimmed;
+					let spans = if self
+						.spans
+						.get(start + count)
+						.is_some_and(|(_, s)| s.block.is_some())
+						&& self.spans[start + count - 1].0.ends_with('\n')
+					{
+						let mut copy = self.spans[start..start + count].to_vec();
+						let last = &mut copy[count - 1].0;
+						last.truncate(last.len() - 1);
+						trimmed = copy;
+						&trimmed[..]
+					} else {
+						&self.spans[start..start + count]
+					};
 					if let Some(index) = target {
 						let url = &self.links[index];
 						let label: String = spans.iter().map(|(text, _)| text.as_str()).collect();
@@ -849,6 +980,144 @@ impl Formatted {
 				}
 			},
 		);
+	}
+	/// Full-width framed block: optional language header with a copy control, then the
+	/// highlighted, wrapped, selectable monospace text.
+	fn show_code_block(ui: &mut egui::Ui, block: &CodeBlock, index: u8) {
+		let colors = crate::design::palette(ui);
+		let code_colors = crate::design::code_colors(ui);
+		let width = ui.max_rect().width();
+		let body = egui::TextStyle::Body.resolve(ui.style());
+		let mono = FontId::monospace((body.size * 0.9).round().max(11.0));
+		let label = block
+			.language
+			.map(crate::highlight::Language::name)
+			.filter(|_| !block.tag.is_empty())
+			.map_or_else(|| block.tag.clone(), str::to_owned);
+		let display = block.display.as_deref().unwrap_or(&block.code);
+		let plain = [(0, display.len() as u32, crate::highlight::Token::Plain)];
+		let segments: &[crate::highlight::Segment] = if block.segments.is_empty() {
+			&plain
+		} else {
+			&block.segments
+		};
+		let id = ui.id().with(("code-block", index));
+		ui.allocate_ui_with_layout(
+			egui::vec2(width, 0.0),
+			egui::Layout::top_down(egui::Align::Min),
+			|ui| {
+				ui.set_width(width);
+				ui.add_space(4.0);
+				let frame = egui::Frame::new()
+					.fill(ui.visuals().code_bg_color)
+					.stroke(Stroke::new(1.0, colors.border))
+					.corner_radius(6)
+					.inner_margin(egui::Margin::symmetric(10, 8));
+				let response = frame.show(ui, |ui| {
+					ui.set_width(ui.available_width());
+					ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+					if !label.is_empty() {
+						ui.horizontal(|ui| {
+							ui.label(
+								egui::RichText::new(&label)
+									.small()
+									.color(colors.muted)
+									.family(crate::design::semibold_family(ui.ctx())),
+							);
+							ui.with_layout(
+								egui::Layout::right_to_left(egui::Align::Center),
+								|ui| {
+									Self::copy_button(ui, id, &block.code);
+								},
+							);
+						});
+						let separator = ui.available_rect_before_wrap();
+						ui.painter().hline(
+							separator.x_range(),
+							separator.top(),
+							Stroke::new(1.0, colors.border),
+						);
+						ui.add_space(2.0);
+					}
+					let mut job = LayoutJob::default();
+					job.wrap.max_width = ui.available_width();
+					for (start, end, token) in segments {
+						job.append(
+							&display[*start as usize..*end as usize],
+							0.0,
+							TextFormat {
+								font_id: mono.clone(),
+								color: code_colors.color(*token, colors.text),
+								italics: *token == crate::highlight::Token::Comment,
+								..Default::default()
+							},
+						);
+					}
+					if display.is_empty() {
+						job.append(" ", 0.0, TextFormat::simple(mono.clone(), colors.muted));
+					}
+					let response = ui.add(egui::Label::new(job).wrap().selectable(true));
+					response.widget_info(|| {
+						egui::WidgetInfo::labeled(
+							egui::WidgetType::Label,
+							ui.is_enabled(),
+							format!(
+								"Code block{}: {}",
+								if label.is_empty() {
+									String::new()
+								} else {
+									format!(" ({label})")
+								},
+								block.code
+							),
+						)
+					});
+				});
+				if label.is_empty() {
+					// No header to hold the control: float it over the corner while hovered.
+					let rect = response.response.rect;
+					let size = 24.0;
+					let target = egui::Rect::from_min_size(
+						rect.right_top() + egui::vec2(-size - 5.0, 5.0),
+						egui::Vec2::splat(size),
+					);
+					let copied = Self::copied_recently(ui, id);
+					if ui.rect_contains_pointer(rect) || copied {
+						let mut child = ui.new_child(
+							egui::UiBuilder::new()
+								.max_rect(target)
+								.layout(egui::Layout::left_to_right(egui::Align::Center)),
+						);
+						child.painter().rect_filled(target, 6, colors.raised);
+						Self::copy_button(&mut child, id, &block.code);
+					}
+				}
+				ui.add_space(4.0);
+			},
+		);
+	}
+	fn copied_recently(ui: &egui::Ui, id: egui::Id) -> bool {
+		let now = ui.input(|input| input.time);
+		ui.data(|data| data.get_temp::<f64>(id))
+			.is_some_and(|at| now - at < 1.5)
+	}
+	fn copy_button(ui: &mut egui::Ui, id: egui::Id, code: &str) {
+		let copied = Self::copied_recently(ui, id);
+		let (icon, label) = if copied {
+			(crate::icons::Icon::Check, "Copied")
+		} else {
+			(crate::icons::Icon::Copy, "Copy code")
+		};
+		let response = crate::icons::button(ui, icon, 24.0, label);
+		if response.clicked() {
+			ui.ctx().copy_text(code.to_owned());
+			let now = ui.input(|input| input.time);
+			ui.data_mut(|data| data.insert_temp(id, now));
+		}
+		if copied {
+			ui.ctx()
+				.request_repaint_after(std::time::Duration::from_millis(200));
+		}
 	}
 	/// One galley per run: emoji occupy fixed-width slots inside the text layout, so rows
 	/// holding artwork grow before any text on them is positioned. Separate widgets would
@@ -1071,6 +1340,42 @@ impl Formatted {
 			self.spans.push((text.to_owned(), style));
 		}
 	}
+	/// Register a fenced block for `info`; beyond the block budget the text stays inline code.
+	fn open_block(&mut self, info: &str) -> Option<u8> {
+		if self.blocks.len() >= MAX_BLOCKS {
+			return None;
+		}
+		let tag: String = info
+			.split_whitespace()
+			.next()
+			.unwrap_or_default()
+			.chars()
+			.filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '#' | '-' | '_' | '.'))
+			.take(24)
+			.collect();
+		self.blocks.push(CodeBlock {
+			language: crate::highlight::Language::from_tag(&tag),
+			tag,
+			code: String::new(),
+			display: None,
+			segments: Vec::new(),
+		});
+		Some((self.blocks.len() - 1) as u8)
+	}
+	fn close_block(&mut self, index: u8) {
+		let block = &mut self.blocks[usize::from(index)];
+		let trimmed = block.code.trim_end_matches(['\n', '\r']).len();
+		block.code.truncate(trimmed);
+		block.display = block
+			.code
+			.contains('\t')
+			.then(|| block.code.replace('\t', "    "));
+		let display = block.display.as_deref().unwrap_or(&block.code);
+		block.segments = block
+			.language
+			.map(|language| crate::highlight::tokenize(language, display))
+			.unwrap_or_default();
+	}
 	fn line_start(&self) -> bool {
 		self.spans
 			.iter()
@@ -1081,6 +1386,17 @@ impl Formatted {
 	pub fn bytes(&self) -> usize {
 		self.spans.capacity() * size_of::<(String, Style)>()
 			+ self.spans.iter().map(|(s, _)| s.capacity()).sum::<usize>()
+			+ self.blocks.capacity() * size_of::<CodeBlock>()
+			+ self
+				.blocks
+				.iter()
+				.map(|b| {
+					b.tag.capacity()
+						+ b.code.capacity()
+						+ b.display.as_ref().map_or(0, String::capacity)
+						+ b.segments.capacity() * size_of::<crate::highlight::Segment>()
+				})
+				.sum::<usize>()
 			+ self.links.capacity() * size_of::<String>()
 			+ self.links.iter().map(String::capacity).sum::<usize>()
 	}
@@ -2114,6 +2430,174 @@ mod tests {
 			.count();
 		output.drop_without_applying_deltas();
 		assert_eq!(images, 2, "one image per complete grapheme, none in code");
+	}
+	#[test]
+	fn fenced_blocks_record_language_and_discord_fence_shapes() {
+		let parsed = Formatted::parse("intro\n```js\nconst a = 1;\n```\nafter");
+		assert_eq!(parsed.blocks.len(), 1);
+		assert_eq!(
+			parsed.blocks[0].language,
+			Some(crate::highlight::Language::JavaScript)
+		);
+		assert_eq!(parsed.blocks[0].code, "const a = 1;");
+		assert!(!parsed.blocks[0].segments.is_empty());
+		let block_spans: Vec<&str> = parsed
+			.spans
+			.iter()
+			.filter(|(_, style)| style.block == Some(0))
+			.map(|(text, _)| text.as_str())
+			.collect();
+		assert_eq!(block_spans.concat(), "const a = 1;\n");
+		assert!(
+			parsed
+				.spans
+				.iter()
+				.any(|(t, s)| t == "after" && s.block.is_none() && !s.code)
+		);
+
+		// Closing fence at the end of the last content line, then text on the fence line.
+		let parsed = Formatted::parse("```py\nprint(1)``` trailing");
+		assert_eq!(parsed.blocks.len(), 1);
+		assert_eq!(parsed.blocks[0].code, "print(1)");
+		assert_eq!(
+			parsed.blocks[0].language,
+			Some(crate::highlight::Language::Python)
+		);
+		assert!(
+			parsed
+				.spans
+				.iter()
+				.any(|(t, s)| t.contains("trailing") && s.block.is_none())
+		);
+
+		// One-line triple backticks are a block without a language; unknown tags keep their name.
+		let parsed = Formatted::parse("```echo hi``` and `inline`");
+		assert_eq!(parsed.blocks.len(), 1);
+		assert_eq!(parsed.blocks[0].code, "echo hi");
+		assert!(parsed.blocks[0].language.is_none() && parsed.blocks[0].tag.is_empty());
+		assert!(
+			parsed
+				.spans
+				.iter()
+				.any(|(t, s)| t == "inline" && s.code && s.block.is_none())
+		);
+		let parsed = Formatted::parse("```elixir\nIO.puts 1\n```");
+		assert_eq!(parsed.blocks[0].tag, "elixir");
+		assert!(parsed.blocks[0].language.is_none());
+		assert_eq!(parsed.blocks[0].segments, Vec::new());
+
+		// Discord has no indented code blocks and bounds the block count.
+		let parsed = Formatted::parse("text\n\n    not code");
+		assert!(parsed.blocks.is_empty());
+		assert!(parsed.spans.iter().all(|(_, style)| !style.code));
+		let many = "```\nx\n```\n".repeat(MAX_BLOCKS + 4);
+		let parsed = Formatted::parse(&many);
+		assert!(parsed.blocks.len() <= MAX_BLOCKS);
+	}
+	#[test]
+	fn code_blocks_render_a_framed_widget_with_copy_control() {
+		fn walk<'a>(shape: &'a egui::Shape, out: &mut Vec<&'a egui::Shape>) {
+			match shape {
+				egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+				other => out.push(other),
+			}
+		}
+		let ctx = egui::Context::default();
+		crate::icons::install(&ctx);
+		let parsed = Formatted::parse("before\n```rust\nfn main() {}\n```\nafter");
+		let frame = |events| {
+			ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(420.0, 300.0),
+					)),
+					events,
+					..Default::default()
+				},
+				|ui| parsed.show(ui, &mut None),
+			)
+		};
+		let mut button = None;
+		for _ in 0..2 {
+			let output = frame(vec![]);
+			let code_bg = ctx.global_style().visuals.code_bg_color;
+			let mut shapes = Vec::new();
+			output
+				.shapes
+				.iter()
+				.for_each(|s| walk(&s.shape, &mut shapes));
+			let texts: Vec<(&str, egui::Pos2, egui::Vec2, egui::FontFamily)> = shapes
+				.iter()
+				.filter_map(|shape| match shape {
+					egui::Shape::Text(text) => Some((
+						text.galley.text(),
+						text.pos,
+						text.galley.size(),
+						text.galley.job.sections[0].format.font_id.family.clone(),
+					)),
+					_ => None,
+				})
+				.collect();
+			let code = texts
+				.iter()
+				.find(|(text, ..)| *text == "fn main() {}")
+				.expect("code text");
+			assert_eq!(code.3, egui::FontFamily::Monospace);
+			assert!(
+				texts.iter().any(|(text, ..)| *text == "Rust"),
+				"language header"
+			);
+			assert!(
+				texts.iter().any(|(text, ..)| *text == "before"),
+				"paragraph newline before the block is dropped: {texts:?}"
+			);
+			assert!(texts.iter().any(|(text, ..)| *text == "after"));
+			let bg = shapes
+				.iter()
+				.find_map(|shape| match shape {
+					egui::Shape::Rect(rect) if rect.fill == code_bg => Some(rect.rect),
+					_ => None,
+				})
+				.expect("framed background");
+			assert!(bg.contains_rect(egui::Rect::from_min_size(code.1, code.2)));
+			let header = texts
+				.iter()
+				.find(|(text, ..)| *text == "Rust")
+				.expect("header");
+			button = Some(egui::pos2(
+				bg.right() - 10.0 - 12.0,
+				header.1.y + header.2.y / 2.0,
+			));
+			output.drop_without_applying_deltas();
+		}
+		let pos = button.expect("copy control");
+		let output = frame(vec![
+			egui::Event::PointerMoved(pos),
+			egui::Event::PointerButton {
+				pos,
+				button: egui::PointerButton::Primary,
+				pressed: true,
+				modifiers: egui::Modifiers::NONE,
+			},
+			egui::Event::PointerButton {
+				pos,
+				button: egui::PointerButton::Primary,
+				pressed: false,
+				modifiers: egui::Modifiers::NONE,
+			},
+		]);
+		let copied: Vec<String> = output
+			.platform_output
+			.commands
+			.iter()
+			.filter_map(|command| match command {
+				egui::OutputCommand::CopyText(text) => Some(text.clone()),
+				_ => None,
+			})
+			.collect();
+		output.drop_without_applying_deltas();
+		assert_eq!(copied, vec!["fn main() {}".to_owned()]);
 	}
 	#[test]
 	fn mass_mentions_render_as_pills_only_for_exact_plain_tokens() {

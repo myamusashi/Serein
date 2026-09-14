@@ -1505,6 +1505,78 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 		.inner
 }
 
+/// Syntax colours for fenced code blocks: one dark and one light set, tuned to stay legible
+/// on the `raised` surface every preset uses as its code background.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CodeColors {
+	pub keyword: Color32,
+	pub type_name: Color32,
+	pub function: Color32,
+	pub string: Color32,
+	pub comment: Color32,
+	pub number: Color32,
+	pub constant: Color32,
+	pub attribute: Color32,
+	pub tag: Color32,
+	pub punctuation: Color32,
+	pub added: Color32,
+	pub removed: Color32,
+}
+impl CodeColors {
+	pub fn color(&self, token: crate::highlight::Token, plain: Color32) -> Color32 {
+		use crate::highlight::Token;
+		match token {
+			Token::Plain => plain,
+			Token::Keyword => self.keyword,
+			Token::Type => self.type_name,
+			Token::Function => self.function,
+			Token::String => self.string,
+			Token::Comment => self.comment,
+			Token::Number => self.number,
+			Token::Constant => self.constant,
+			Token::Attribute => self.attribute,
+			Token::Tag => self.tag,
+			Token::Punctuation => self.punctuation,
+			Token::Added => self.added,
+			Token::Removed => self.removed,
+		}
+	}
+}
+pub fn code_colors(ui: &egui::Ui) -> CodeColors {
+	let p = palette(ui);
+	if ui.visuals().dark_mode {
+		CodeColors {
+			keyword: rgb(0xc792ea),
+			type_name: rgb(0xffcb6b),
+			function: rgb(0x82aaff),
+			string: rgb(0xa5d97a),
+			comment: p.muted,
+			number: rgb(0xf78c6c),
+			constant: rgb(0xf07178),
+			attribute: rgb(0x89ddff),
+			tag: rgb(0xf07178),
+			punctuation: mix(p.text, p.muted, 0.5),
+			added: p.positive,
+			removed: p.danger,
+		}
+	} else {
+		CodeColors {
+			keyword: rgb(0x7c3aed),
+			type_name: rgb(0xb45309),
+			function: rgb(0x1d4ed8),
+			string: rgb(0x15803d),
+			comment: p.muted,
+			number: rgb(0xc2410c),
+			constant: rgb(0xbe185d),
+			attribute: rgb(0x0e7490),
+			tag: rgb(0xbe123c),
+			punctuation: mix(p.text, p.muted, 0.5),
+			added: p.positive,
+			removed: p.danger,
+		}
+	}
+}
+
 /// Linear blend of two colours in premultiplied space; `t` = 0 keeps `a`, 1 gives `b`.
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 	let lerp = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
