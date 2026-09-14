@@ -7018,6 +7018,13 @@ dependencies = [
  "memchr",
  "nom",
  "petgraph",
+name = "tray-debug"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "ksni",
+ "tokio",
+ "zbus",
 ]
 
 [[package]]
