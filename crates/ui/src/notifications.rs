@@ -164,12 +164,17 @@ impl MessagingUi {
 							.filter(|call| call.guild.is_none())
 							.map(|call| call.channel);
 						// Existing channel metadata bounds this list; only visible avatar rows request images.
-						for channel in state.channels.iter().filter(|c| {
-							c.guild.is_none()
-								&& c.supports_text() && (Some(c.id) == call
-								|| state.channel_unread(c) == Some(true)
-								|| state.unread_count(c.id) > 0)
-						}) {
+						for channel in state
+							.channels
+							.iter()
+							.filter(|c| {
+								c.guild.is_none()
+									&& c.supports_text() && (Some(c.id) == call
+									|| state.channel_unread(c) == Some(true)
+									|| state.unread_count(c.id) > 0)
+							})
+							.take(15)
+						{
 							let in_call = Some(channel.id) == call;
 							let response = if channel.kind == 3 {
 								self.avatars.show_group(ui, channel, 48.0, state.demo)
