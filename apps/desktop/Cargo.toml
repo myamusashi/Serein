@@ -6,6 +6,8 @@ license.workspace = true
 
 [features]
 default = []
+# No-op: token sign-in used to require this flag; it is now always built in.
+# Kept only so `--features developer-session` in older scripts keeps building.
 developer-session = []
 demo = ["dep:test-support", "ui/demo"]
 

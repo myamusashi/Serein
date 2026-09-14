@@ -35,7 +35,6 @@ use client_core::{
 use eframe::egui;
 use model::Delivery;
 use std::{sync::Arc, time::Duration};
-#[cfg(feature = "developer-session")]
 use zeroize::Zeroizing;
 
 /// Sign-in header strip: doubles as the window drag region, so it clears the traffic lights.
@@ -403,7 +402,6 @@ struct Desktop {
 	authorized: bool,
 	#[cfg(feature = "demo")]
 	synthetic_id: u64,
-	#[cfg(feature = "developer-session")]
 	token_input: Zeroizing<String>,
 }
 /// Check only navigation whose effective access can change with this event.
@@ -1287,7 +1285,6 @@ impl Desktop {
 			authorized: false,
 			#[cfg(feature = "demo")]
 			synthetic_id,
-			#[cfg(feature = "developer-session")]
 			token_input: Zeroizing::new(String::new()),
 		})
 	}
@@ -1386,10 +1383,7 @@ impl Desktop {
 		self.messaging
 			.apply_reading_preferences(ctx, self.reading.current);
 		ctx.clear_animations();
-		#[cfg(feature = "developer-session")]
-		{
-			self.token_input = Zeroizing::new(String::new());
-		}
+		self.token_input = Zeroizing::new(String::new());
 		if !was_demo && let Some(store) = &self.store {
 			self.forgetting = store
 				.send
@@ -2853,13 +2847,14 @@ impl Desktop {
 							if ui.button("Forget saved login").clicked() { self.logout(&ctx); }
 						}
 					});
-				#[cfg(feature = "developer-session")]
 				if !self.fixture_only {
-					ui.collapsing("Developer session", |ui| {
-						ui.add(egui::TextEdit::singleline(&mut *self.token_input).password(true).char_limit(2048).hint_text("Owner-supplied test credential"));
-						if ui.add_enabled(self.authorized, egui::Button::new("Connect imported session (RAM only)")).clicked() {
+					ui.collapsing("Sign in with a token", |ui| {
+						ui.small("For owners who already have a valid Discord session token, for example from another signed-in Serein install. Passwords and 2FA are never used here; this bypasses Discord's hosted login page entirely.");
+						ui.add_space(4.0);
+						ui.add(egui::TextEdit::singleline(&mut *self.token_input).password(true).char_limit(2048).hint_text("Session token"));
+						if ui.add_enabled(self.authorized, egui::Button::new("Connect with this token")).clicked() {
 							let input = std::mem::take(&mut *self.token_input);
-							match SessionSecret::from_owner_input(input) { Ok(secret) => self.connect(secret, false, &ctx), Err(f) => self.state.status = f.label() }
+							match SessionSecret::from_owner_input(input) { Ok(secret) => self.connect(secret, true, &ctx), Err(f) => self.state.status = f.label() }
 						}
 					});
 				}
@@ -3458,10 +3453,14 @@ impl Desktop {
 			if let Some(secret) = login.token() {
 				self.connect(secret, true, ctx);
 			} else if login.expired() {
+				let crashed = login.crashed();
 				self.login = None;
 				self.state.auth = AuthState::Challenged;
-				self.state.status =
-					"Login timed out or token handoff unavailable; no session accepted";
+				self.state.status = if crashed {
+					"Login window stopped unexpectedly (web process ended); no session accepted"
+				} else {
+					"Login timed out or token handoff unavailable; no session accepted"
+				};
 			}
 		}
 		// Network and store workers request repaint only when their outcomes change.
