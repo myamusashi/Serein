@@ -192,7 +192,7 @@ mod tests {
 		let mut clipboard = arboard::Clipboard::new().unwrap();
 		clipboard.set().file_list(&[&file]).unwrap();
 		let request = ui::AttachmentPaste {
-			target: eframe::egui::Id::new("paste"),
+			target: eframe::egui::Id::unique("paste"),
 			text: None,
 			image: None,
 		};
