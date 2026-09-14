@@ -290,6 +290,11 @@ fn grouped(previous: Option<&Message>, message: &Message, boundary: Option<Id>) 
 			&& (timestamp(message.id) - timestamp(previous.id)).whole_seconds() < 300
 	})
 }
+
+fn mentions_viewer(message: &Message, viewer: Option<Id>) -> bool {
+	message.mention_everyone
+		|| viewer.is_some_and(|viewer| message.mentions.iter().any(|mention| mention.id == viewer))
+}
 fn row_key(message: &Message, previous: Option<&Message>, boundary: Option<Id>) -> u64 {
 	let mut key = DefaultHasher::new();
 	layout_key(message).hash(&mut key);
@@ -1412,9 +1417,8 @@ impl TimelineView {
 							});
 						});
 					let rect = row.response.rect;
-					let mentioned = state.user.as_ref().is_some_and(|user| {
-						message.mentions.iter().any(|mention| mention.id == user.id)
-					});
+					let mentioned =
+						mentions_viewer(message, state.user.as_ref().map(|user| user.id));
 					if mentioned {
 						ui.painter().set(
 							background,
@@ -2451,6 +2455,13 @@ mod tests {
 			reactions: Some(vec![]),
 			embeds_suppressed: false,
 		}
+	}
+	#[test]
+	fn mass_mentions_highlight_every_viewer() {
+		let mut message = text_message(1);
+		assert!(!mentions_viewer(&message, Some(Id(7))));
+		message.mention_everyone = true;
+		assert!(mentions_viewer(&message, Some(Id(7))));
 	}
 	#[test]
 	fn forwarded_audio_keeps_sender_label_and_player_in_narrow_and_wide_rows() {

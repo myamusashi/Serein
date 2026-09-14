@@ -2012,6 +2012,8 @@ impl MessagingUi {
 		} else {
 			Vec::new()
 		};
+		let mass_mentions =
+			state.permission(channel, model::permissions::MENTION_EVERYONE) == Some(true);
 		let cursor = egui::text_edit::TextEditState::load(ctx, composer_id)
 			.and_then(|s| s.cursor.char_range())
 			.filter(|r| r.is_empty())
@@ -2245,6 +2247,7 @@ impl MessagingUi {
                                 draft,
                                 ui.available_width(),
                                 &mention_users,
+                                mass_mentions,
                                 &mut self.avatars,
                                 demo,
                             );
@@ -2256,6 +2259,7 @@ impl MessagingUi {
                                 buffer.as_str(),
                                 width,
                                 &mention_users,
+                                mass_mentions,
                                 &mut self.avatars,
                                 demo,
                             )
@@ -3173,7 +3177,7 @@ mod composer_tests {
 									view.composer(ui, &mut state, Id(10), &ctx, &mut vec![]);
 									empty_height = view
 										.composer_layout
-										.galley(ui, "", 300.0, &[], &mut view.avatars, true)
+										.galley(ui, "", 300.0, &[], false, &mut view.avatars, true)
 										.rect
 										.height();
 								},

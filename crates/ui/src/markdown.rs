@@ -25,6 +25,7 @@ struct Style {
 	small: bool,
 	link: Option<usize>,
 	mention: Option<Id>,
+	mass_mention: bool,
 	channel: Option<Id>,
 	no_autolink: bool,
 	spoiler: Option<u8>,
@@ -607,16 +608,22 @@ impl Formatted {
 	fn push_mentions(&mut self, text: &str, style: Style, source: &str) {
 		let mut consumed = 0;
 		let mut raw_cursor = 0;
-		for (start, _) in text.match_indices('<') {
+		for (start, _) in text.match_indices(['<', '@']) {
 			let reference = &text[start..];
-			let is_channel = reference.starts_with("<#");
-			let Some((id, len)) = (if is_channel {
-				model::channel_mention_prefix(reference)
-			} else {
-				model::user_mention_prefix(reference)
-			}) else {
-				continue;
-			};
+			let (id, len, is_channel, mass_mention) =
+				if let Some(len) = model::mass_mention_prefix(reference) {
+					(None, len, false, true)
+				} else {
+					let is_channel = reference.starts_with("<#");
+					let Some((id, len)) = (if is_channel {
+						model::channel_mention_prefix(reference)
+					} else {
+						model::user_mention_prefix(reference)
+					}) else {
+						continue;
+					};
+					(Some(id), len, is_channel, false)
+				};
 			if self.mention_count >= model::MAX_MENTIONS {
 				self.limited = true;
 				break;
@@ -638,8 +645,9 @@ impl Formatted {
 			self.push(
 				token,
 				Style {
-					mention: (!is_channel).then_some(id),
-					channel: is_channel.then_some(id),
+					mention: id.filter(|_| !is_channel),
+					mass_mention,
+					channel: id.filter(|_| is_channel),
 					..style
 				},
 			);
@@ -1063,8 +1071,11 @@ impl Formatted {
 	}
 	fn format(ui: &egui::Ui, style: &Style) -> TextFormat {
 		let visuals = ui.visuals();
+		let colors = crate::design::palette(ui);
 		let body = egui::TextStyle::Body.resolve(ui.style());
-		let color = if style.link.is_some() {
+		let color = if style.mass_mention {
+			colors.mention_text
+		} else if style.link.is_some() {
 			visuals.hyperlink_color
 		} else if style.strong {
 			visuals.strong_text_color()
@@ -1085,14 +1096,16 @@ impl Formatted {
 			valign: ui.text_valign(),
 			font_id: if style.code {
 				FontId::monospace(size)
-			} else if style.strong {
+			} else if style.strong || style.mass_mention {
 				// egui has no synthetic bold: emphasis comes from the bundled heavier face.
 				FontId::new(size, crate::design::semibold_family(ui.ctx()))
 			} else {
 				FontId::new(size, body.family)
 			},
 			color,
-			background: if style.code {
+			background: if style.mass_mention {
+				colors.mention_bg
+			} else if style.code {
 				visuals.code_bg_color
 			} else {
 				egui::Color32::TRANSPARENT
@@ -2086,6 +2099,37 @@ mod tests {
 			.count();
 		output.drop_without_applying_deltas();
 		assert_eq!(images, 2, "one image per complete grapheme, none in code");
+	}
+	#[test]
+	fn mass_mentions_render_as_pills_only_for_exact_plain_tokens() {
+		let parsed = Formatted::parse("@everyone @here `@everyone` @everyone_else \\@here");
+		assert_eq!(
+			parsed
+				.spans
+				.iter()
+				.filter(|(_, style)| style.mass_mention)
+				.map(|(text, _)| text.as_str())
+				.collect::<Vec<_>>(),
+			["@everyone", "@here"]
+		);
+		let ctx = egui::Context::default();
+		let output = ctx.run_ui(Default::default(), |ui| parsed.show(ui, &mut None));
+		let colors = crate::design::palette_for(&ctx);
+		let highlighted = output
+			.shapes
+			.iter()
+			.filter_map(|shape| match &shape.shape {
+				egui::Shape::Text(text) => Some(&text.galley.job.sections),
+				_ => None,
+			})
+			.flatten()
+			.filter(|section| {
+				section.format.background == colors.mention_bg
+					&& section.format.color == colors.mention_text
+			})
+			.count();
+		assert_eq!(highlighted, 2);
+		output.drop_without_applying_deltas();
 	}
 	#[test]
 	fn mention_highlights_include_unknown_users_in_both_themes() {
