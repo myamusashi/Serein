@@ -766,3 +766,11 @@ names, symlinks and special files are validated before writing to private stagin
 beside the installation. Staging records the app/helper owner and is reused or
 cleaned before another download; backups from interrupted replacements are kept
 for recovery and block another installation instead of being deleted.
+
+Linux AppImages reuse the same 512 MiB streamed download/checksum limit and private
+sibling staging. Their Type 2 ELF header and x86-64 architecture are checked without
+executing the download. The image is not unpacked; restart atomically replaces the
+original AppImage path and retains a hard-linked backup until the replacement
+survives its initial two-second launch check. This detects immediate launch failure,
+not application health or a successful login. Interrupted backups block subsequent
+updates for manual recovery. Native Linux packages remain package-manager managed.

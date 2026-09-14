@@ -166,7 +166,7 @@ impl MessagingUi {
 			ui.add_space(12.0);
 			ui.weak("Offline preview. Update actions are simulated and preferences are not saved.");
 		} else if !self.updates.supported {
-			ui.weak("In-app installation requires a supported macOS or Windows release package. Source builds and Linux installations must be updated manually.");
+			ui.weak("In-app installation requires a macOS or Windows release package, or a Linux x86-64 AppImage. Other Linux installations use their package manager.");
 		}
 		ui.add_space(16.0);
 		ui.separator();

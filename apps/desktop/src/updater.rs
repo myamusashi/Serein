@@ -37,7 +37,7 @@ struct Release {
 #[derive(Clone)]
 struct Package {
 	version: String,
-	// `None` on a platform with no in-app installer (Linux): the version is still reported,
+	// `None` on an installation with no in-app installer: the version is still reported,
 	// but there is nothing here to download.
 	archive: Option<Asset>,
 	checksums: Option<Asset>,
@@ -136,9 +136,7 @@ impl Updater {
 			view.supported = true;
 			return false;
 		}
-		// Linux still checks and reports a newer version; it just has nothing to download
-		// in-app (see `asset_name`), so every download/install path below stays `supported`-gated.
-		let supported = cfg!(any(target_os = "macos", windows));
+		let supported = cfg!(any(target_os = "macos", windows)) || install::appimage_session();
 		view.supported = supported;
 		if !enabled {
 			if let Some(job) = &self.job {
@@ -485,6 +483,9 @@ fn release_version(tag: &str) -> Option<semver::Version> {
 	semver::Version::parse(tag.strip_prefix('v')?).ok()
 }
 fn asset_name(tag: &str) -> Option<String> {
+	if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+		return install::appimage_session().then(|| format!("serein-{tag}-Linux-X64.AppImage"));
+	}
 	let os = if cfg!(target_os = "macos") {
 		"macOS"
 	} else if cfg!(windows) {
@@ -530,7 +531,7 @@ fn select_release(
 	if release.assets.len() > 32 {
 		return Err("The release contains too many assets.".into());
 	}
-	// No in-app installer on this platform (Linux): still report the newer version so the
+	// No in-app installer for this installation: still report the newer version so the
 	// UI can show it, but there is no asset to look up or download.
 	let Some(wanted) = asset_name(&release.tag_name) else {
 		return Ok(Some(Package {

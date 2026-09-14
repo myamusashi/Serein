@@ -25,10 +25,61 @@ const WINDOWS_FILES: &[&str] = &[
 	"setup.ps1",
 ];
 
+pub(super) fn appimage_session() -> bool {
+	static APPIMAGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*APPIMAGE.get_or_init(|| {
+		cfg!(all(target_os = "linux", target_arch = "x86_64"))
+			&& std::env::var_os("APPIMAGE").is_some_and(|p| Path::new(&p).is_absolute())
+			&& std::env::var_os("APPDIR").is_some_and(|p| Path::new(&p).is_absolute())
+	})
+}
+
+fn appimage_header(header: &[u8]) -> bool {
+	header.len() >= 20
+		&& header[..7] == *b"\x7fELF\x02\x01\x01"
+		&& header[8..11] == *b"AI\x02"
+		&& matches!(u16::from_le_bytes([header[16], header[17]]), 2 | 3)
+		&& header[18..20] == [62, 0]
+}
+
+fn verify_appimage(path: &Path) -> Result<(), String> {
+	let mut header = [0; 20];
+	let mut file = fs::File::open(path).map_err(|_| "Cannot read the AppImage.")?;
+	let metadata = file
+		.metadata()
+		.map_err(|_| "Cannot inspect the AppImage.")?;
+	if !metadata.is_file()
+		|| metadata.len() > super::MAX_DOWNLOAD
+		|| file.read_exact(&mut header).is_err()
+		|| !appimage_header(&header)
+	{
+		return Err("The update is not a supported x86-64 Type 2 AppImage.".into());
+	}
+	Ok(())
+}
+
 fn installation() -> Result<PathBuf, String> {
 	let exe = std::env::current_exe()
 		.and_then(fs::canonicalize)
 		.map_err(|_| "Cannot locate the installed application.".to_owned())?;
+	if cfg!(target_os = "linux") {
+		if !appimage_session() {
+			return Err(
+				"Use your package manager to update Serein, or run a release AppImage.".into(),
+			);
+		}
+		let appdir = PathBuf::from(std::env::var_os("APPDIR").ok_or("Missing AppImage mount.")?);
+		if fs::canonicalize(appdir.join("usr/bin/serein"))
+			.ok()
+			.as_ref() != Some(&exe)
+		{
+			return Err("Run Serein from its AppImage to install updates.".into());
+		}
+		let image = PathBuf::from(std::env::var_os("APPIMAGE").ok_or("Missing AppImage path.")?);
+		let image = fs::canonicalize(image).map_err(|_| "Cannot locate the installed AppImage.")?;
+		verify_appimage(&image)?;
+		return Ok(image);
+	}
 	// canonicalize returns extended Windows paths; PowerShell 5.1 expects ordinary drive/UNC paths.
 	#[cfg(windows)]
 	let exe = {
@@ -82,7 +133,7 @@ fn installation() -> Result<PathBuf, String> {
 
 pub(super) fn create_stage() -> Result<Staged, String> {
 	let installation = installation()?;
-	let parent = if cfg!(target_os = "macos") {
+	let parent = if cfg!(any(target_os = "macos", target_os = "linux")) {
 		installation
 			.parent()
 			.ok_or("Cannot locate the application folder.")?
@@ -147,6 +198,7 @@ pub(super) fn create_stage() -> Result<Staged, String> {
 		if entry.path().join("previous.app").exists()
 			|| entry.path().join("previous").exists()
 			|| entry.path().join("failed.app").exists()
+			|| entry.path().join("previous.AppImage").exists()
 		{
 			return Err(format!(
 				"An interrupted update needs recovery before continuing. Its backup is in {}.",
@@ -379,6 +431,22 @@ pub(super) fn unpack(
 	installed: &Path,
 	cancel: &AtomicBool,
 ) -> Result<(), String> {
+	if cfg!(target_os = "linux") {
+		if cancel.load(Ordering::Relaxed) {
+			return Err("Update cancelled.".into());
+		}
+		let download = directory.join("package.zip");
+		verify_appimage(&download)?;
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			fs::set_permissions(&download, fs::Permissions::from_mode(0o755))
+				.map_err(|_| "Cannot make the AppImage executable.")?;
+		}
+		fs::rename(download, directory.join("package.AppImage"))
+			.map_err(|_| "Cannot stage the AppImage.")?;
+		return Ok(());
+	}
 	let mut archive = fs::File::open(directory.join("package.zip"))
 		.map_err(|_| "Cannot read the downloaded update.".to_owned())?;
 	let directory_start = preflight_zip(&mut archive)?;
@@ -624,6 +692,30 @@ pub(super) fn prepare_restart(
 			.spawn()
 			.map_err(|_| "Cannot start the update helper.".to_owned())?
 	};
+	#[cfg(target_os = "linux")]
+	let mut child = {
+		let _ = version;
+		if self::installation()?.as_path() != installation {
+			return Err("The installed AppImage moved; restart before updating.".into());
+		}
+		verify_appimage(&directory.join("package.AppImage"))?;
+		let script = directory.join("install.sh");
+		fs::write(&script, LINUX_HELPER).map_err(|_| "Cannot prepare the update helper.")?;
+		Command::new("/bin/sh")
+			.env_remove("LD_LIBRARY_PATH")
+			.env_remove("LD_PRELOAD")
+			.arg(&script)
+			.arg(directory)
+			.arg(installation)
+			.arg(std::process::id().to_string())
+			.arg(&marker)
+			.current_dir("/")
+			.stdin(Stdio::null())
+			.stdout(Stdio::null())
+			.stderr(Stdio::null())
+			.spawn()
+			.map_err(|_| "Cannot start the update helper.")?
+	};
 	#[cfg(windows)]
 	let mut child = {
 		let script = directory.join("install.ps1");
@@ -657,12 +749,12 @@ pub(super) fn prepare_restart(
 			.spawn()
 			.map_err(|_| "Cannot start the update helper.".to_owned())?
 	};
-	#[cfg(not(any(target_os = "macos", windows)))]
+	#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 	{
 		let _ = (installation, marker, version);
 		Err("In-app installation is unsupported on this platform.".into())
 	}
-	#[cfg(any(target_os = "macos", windows))]
+	#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 	{
 		for _ in 0..200 {
 			if ready.is_file() {
@@ -727,6 +819,9 @@ fi
 /bin/rm -rf "$stage"
 "#;
 
+#[cfg(target_os = "linux")]
+const LINUX_HELPER: &str = include_str!("updater_linux.sh");
+
 #[cfg(windows)]
 const WINDOWS_HELPER: &str = r#"$ErrorActionPreference = 'Stop'
 $stage = $PSScriptRoot
@@ -779,6 +874,19 @@ Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 
 #[cfg(feature = "demo")]
 pub(super) fn debug_check() -> Result<(), String> {
+	let mut header = [0; 20];
+	header[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+	header[8..11].copy_from_slice(b"AI\x02");
+	header[16] = 2;
+	header[18] = 62;
+	if !appimage_header(&header) || appimage_header(&header[..19]) {
+		return Err("AppImage header validation failed.".into());
+	}
+	header[18] = 183;
+	if appimage_header(&header) {
+		return Err("Wrong AppImage architecture accepted.".into());
+	}
+
 	for path in [
 		"../escape",
 		"/absolute",

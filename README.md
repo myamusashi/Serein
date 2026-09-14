@@ -35,7 +35,7 @@ Pre-compiled releases for macOS, Linux, and Windows are published on GitHub [Rel
 |---|---|---|---|
 | **Windows** | `-Setup.exe`, `.zip` | `x86_64` | Per-user NSIS installer (recommended) or standalone portable archive |
 | **macOS** | Homebrew Cask, `.zip` | Apple Silicon (`aarch64`) | Signed and notarized `.app` bundle |
-| **Linux** | `.deb`, `.rpm`, `.pkg.tar.zst`, `.flatpak` | `x86_64` | Ubuntu, Fedora, openSUSE, Arch, and Flatpak |
+| **Linux** | `.AppImage`, `.deb`, `.rpm`, `.pkg.tar.zst`, `.flatpak` | `x86_64` | AppImage with in-app updates; distribution packages and Flatpak |
 
 ---
 
@@ -80,7 +80,18 @@ Download `serein-<version>-macOS-ARM64.zip` from [Releases](https://github.com/V
 
 ---
 
-### Linux (Package Managers)
+### Linux
+
+#### AppImage
+
+Download `serein-<version>-Linux-X64.AppImage`, make it executable with
+`chmod +x ./serein-<version>-Linux-X64.AppImage`, then launch it. Keep it in a
+writable directory to use Settings → Updates for automatic downloads and restart
+installation. The image uses host GTK4/WebKitGTK 6.0 and other native libraries;
+release builds target Ubuntu 26.04 x86_64. See [AppImage setup and runtime
+dependencies](packaging/appimage/README.md) before running it.
+
+#### Package Managers
 
 Download the package matching your distribution from [Releases](https://github.com/ViceVerse-cz/rustcord/releases):
 
