@@ -26,8 +26,15 @@ WebKit6 script-message callbacks lack trusted sender-frame metadata. The callbac
 only a boolean wake signal. A protected main-frame closure retains one ASCII candidate of at
 most 2113 bytes (65-byte capability plus 2048-byte token). A native main-frame query checks
 origin and result bounds before creating a Rust string; Rust checks URI, capability, lifetime
-and SessionSecret validation again. Queries are at least 100 ms apart, with one cancellable
-evaluation and one secret slot. A child frame can only request a query of the main frame.
+and SessionSecret validation again. Linux WebKit also checks the temporary webview's bounded,
+same-origin Discord API requests for an Authorization header, without logging its value.
+Queries are at least 100 ms apart, with one cancellable evaluation and one secret slot. A child
+frame can only request a query of the main frame. The Linux login and verification webviews
+disable HTML media and Web Audio: a machine without a GStreamer audio sink otherwise crashes
+the web process right after login, which surfaces as a distinct "stopped unexpectedly" status.
+The Linux login webview presents the same browser identity as `client_core::fingerprint`;
+WebKitGTK's default "Safari on Linux" user agent made hCaptcha and Discord reject solved
+login challenges.
 
 Close/drop invalidates pending results, clears the secret/scripts/handler, cancels evaluation,
 stops loading, terminates the ephemeral web process and destroys the GTK window. GLib pumping
@@ -46,7 +53,7 @@ Serein uses Discord’s official login page in a temporary platform webview, not
 
 Record only date, OS/build, methods tested, pass/fail and redacted failure category in the task PR description. Never record credentials, account/channel IDs, signed URLs, message contents or QR data. **No real owner-controlled session was supplied or exercised during implementation; the live milestone remains blocked.**
 
-A separate `--features developer-session` build exposes an explicitly labeled, RAM-only owner-provided token field for adapter diagnosis. It is not the normal login, is disabled in release packaging, and never permits extraction from other software.
+Every build's sign-in screen also offers "Sign in with a token": the owner pastes a session token they already hold, for example from another signed-in Serein install. It skips Discord's hosted login page entirely, still requires the owner-authorization checkbox, still validates through `SessionSecret::from_owner_input`, and is saved to the OS credential store the same way a normal login is. It never reads or extracts a credential from another application.
 
 Saved-login startup reports credential lookup separately from Discord connection. A found credential advances the status immediately; absent/invalid/unavailable outcomes remain visible. The UI stops awaiting lookup after 10 seconds and permits manual hosted login. Manual login, preview, logout and timeout discard late lookup results. The synchronous OS call remains on the existing single worker; no background retry workers or plaintext fallback are created.
 
