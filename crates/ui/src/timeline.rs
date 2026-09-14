@@ -49,6 +49,9 @@ pub struct TimelineView {
 	revision: u64,
 	channel: Option<Id>,
 	anchor: Option<(Id, f32)>,
+	autoscroll_origin: Option<egui::Pos2>,
+	autoscroll_frame: Option<u64>,
+	scroll_offset: f32,
 	following: bool,
 	formatted: FormatCache,
 	pending_formatted: FormatCache,
@@ -791,6 +794,40 @@ impl TimelineView {
 				self.highlighted = None;
 			}
 		}
+		let area = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+		let hovered = ui.rect_contains_pointer(area);
+		let frame = ui.ctx().cumulative_frame_nr();
+		let autoscroll_delta = ui.input(|input| {
+			// Layout retries reuse input: toggle and advance only once per displayed frame.
+			if self.autoscroll_frame == Some(frame) {
+				return 0.0;
+			}
+			self.autoscroll_frame = Some(frame);
+			let pointer = &input.pointer;
+			if self.autoscroll_origin.is_some() {
+				if !input.focused
+					|| pointer.hover_pos().is_none()
+					|| pointer.any_pressed()
+					|| input.key_pressed(egui::Key::Escape)
+					|| input.smooth_scroll_delta().y != 0.0
+				{
+					self.autoscroll_origin = None;
+				}
+			} else if pointer.button_pressed(egui::PointerButton::Middle) && hovered {
+				self.autoscroll_origin = pointer.hover_pos();
+			}
+			self.autoscroll_origin
+				.zip(pointer.hover_pos())
+				.map_or(0.0, |(origin, pos)| {
+					let distance = pos.y - origin.y;
+					let travel = (distance.abs() - 8.0).max(0.0);
+					let speed = (travel * 12.0 + travel * travel * 0.12).min(12000.0);
+					-distance.signum() * speed * input.stable_dt.min(0.05)
+				})
+		});
+		if autoscroll_delta > 0.0 {
+			self.following = false;
+		}
 		let mut scroll = egui::ScrollArea::vertical()
 			.id_salt(("timeline", state.selected))
 			.auto_shrink([false, false])
@@ -836,15 +873,30 @@ impl TimelineView {
 				.max(0.0),
 			);
 		}
+		if autoscroll_delta != 0.0 {
+			// Set the viewport before virtualization. A global scroll delta can be consumed
+			// by nested embed scroll areas and moves past the rows laid out this frame.
+			let max_offset =
+				(total + end_padding + pending_rows.iter().map(|(_, height)| height).sum::<f32>()
+					- ui.available_height())
+				.max(0.0);
+			let next =
+				(offset.unwrap_or(self.scroll_offset) - autoscroll_delta).clamp(0.0, max_offset);
+			offset = Some(next);
+			if next != self.scroll_offset {
+				ui.ctx().request_repaint();
+			}
+		}
 		if let Some(offset) = offset {
 			scroll = scroll.vertical_scroll_offset(offset);
 		}
 		let mut measurements = Vec::new();
 		let mut selected_reply = None;
 		// ScrollArea consumes wheel input while applying it; retain the viewing gesture.
-		let scroll_delta = ui.input(|input| input.smooth_scroll_delta().y);
-		let allow_hover =
-			!ui.input(|input| input.is_scrolling()) && ui.ctx().dragged_id().is_none();
+		let scroll_delta = ui.input(|input| input.smooth_scroll_delta().y) + autoscroll_delta;
+		let allow_hover = self.autoscroll_origin.is_none()
+			&& !ui.input(|input| input.is_scrolling())
+			&& ui.ctx().dragged_id().is_none();
 		let output = scroll.show_viewport(ui, |ui, viewport| {
 			ui.spacing_mut().item_spacing.y = 0.0;
 			if welcome && let Some(channel) = state.selected.and_then(|id| state.channel(id)) {
@@ -1703,6 +1755,21 @@ impl TimelineView {
 			}
 			viewport.min.y
 		});
+		self.scroll_offset = output.state.offset.y;
+		if let Some(origin) = self.autoscroll_origin {
+			let colors = crate::design::palette(ui);
+			let painter = ui.painter().with_clip_rect(output.inner_rect);
+			painter.circle_filled(origin, 12.0, colors.raised);
+			painter.circle_stroke(origin, 12.0, egui::Stroke::new(1.0, colors.muted));
+			painter.text(
+				origin,
+				egui::Align2::CENTER_CENTER,
+				"↕",
+				egui::FontId::proportional(18.0),
+				colors.text,
+			);
+			ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+		}
 		// ScrollArea applies wheel input after laying out its contents. Preserve that
 		// movement when new row measurements rebuild the timeline on the next pass.
 		let (anchor, _, anchor_top) = visible_range(
@@ -1760,7 +1827,9 @@ impl TimelineView {
 					self.latest = true;
 				}
 			}
-			ui.ctx().request_repaint();
+			if autoscroll_delta == 0.0 || can_load_newer {
+				ui.ctx().request_repaint();
+			}
 		}
 		if self.reply_target.is_some() {
 			self.target_browsing = true;
@@ -1811,7 +1880,7 @@ impl TimelineView {
 		self.load_older = !self.following
 			&& output.state.offset.y < 160.0
 			&& ui.input(|i| {
-				i.smooth_scroll_delta().y > 0.0
+				scroll_delta > 0.0
 					&& i.pointer
 						.hover_pos()
 						.is_some_and(|pos| output.inner_rect.contains(pos))
