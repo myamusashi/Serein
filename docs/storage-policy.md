@@ -288,6 +288,8 @@ GIF/WebP animations retain at most 80 frames with a 160-pixel edge, about 8 MiB 
 Two queued large stills can retain 32 MiB of decoded pixels; active decoding, image
 conversion and framework/driver allocations are additional. Shared textures are bounded
 by 256 entries / 64 MiB, with a separate four-animation / 16 MiB retained-pixel budget.
+Animation texture uploads are spaced at least 34 ms apart (under 30 FPS), with
+source timing preserved by skipping frames; unfocused windows do not advance clips.
 These are component ceilings, not measured whole-process RSS. Disk eviction retains only
 32 candidate paths at a time. Worker completion fences replacement and deletion, so
 logout/clear cannot race an older worker's writes. Picture-cache failures appear in

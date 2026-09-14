@@ -96,7 +96,7 @@ impl FormatCache {
 			let source = source[..end].to_owned();
 			self.bytes += source.capacity() + parsed.bytes();
 			self.entries.insert(id, (source, parsed, self.clock));
-			while self.entries.len() > 64 || self.bytes > 1024 * 1024 {
+			while self.entries.len() > 512 || self.bytes > 1024 * 1024 {
 				let oldest = *self
 					.entries
 					.iter()
@@ -1136,6 +1136,7 @@ impl Formatted {
 			image: Option<egui::Image<'static>>,
 		}
 		let size = crate::emoji::inline_size(ui);
+		let mut atlas = None;
 		let body = egui::TextStyle::Body.resolve(ui.style());
 		let mut job = LayoutJob::default();
 		let mut source = String::new();
@@ -1161,15 +1162,12 @@ impl Formatted {
 					|(_, len)| len,
 				);
 				let cluster = &text[offset..offset + len];
-				let image = if custom.is_none() && !style.code {
-					crate::emoji::image(ui.ctx(), cluster, size)
+				let cell = if custom.is_none() && !style.code {
+					crate::emoji::lookup(cluster)
 				} else {
 					None
 				};
-				if image.is_none()
-					&& custom.is_none()
-					&& (style.code || crate::emoji::lookup(cluster).is_none())
-				{
+				if cell.is_none() && custom.is_none() {
 					offset += len;
 					continue;
 				}
@@ -1191,7 +1189,11 @@ impl Formatted {
 				inlines.push(Inline {
 					text: cluster.to_owned(),
 					custom: custom.map(|(id, _)| id),
-					image,
+					image: cell.and_then(|cell| {
+						atlas
+							.get_or_insert_with(|| crate::emoji::atlas(ui.ctx()))
+							.map(|atlas| crate::emoji::image_cell(atlas, cluster, cell, size))
+					}),
 				});
 				source.push_str(cluster);
 				offset += len;
@@ -1216,6 +1218,14 @@ impl Formatted {
 			let galley_mut = std::sync::Arc::make_mut(&mut galley);
 			let mut next = 0;
 			for placed in &mut galley_mut.rows {
+				if next >= inlines.len()
+					|| !placed
+						.glyphs
+						.iter()
+						.any(|glyph| glyph.chr == '\u{200b}' && glyph.line_height == size)
+				{
+					continue;
+				}
 				let row = std::sync::Arc::make_mut(&mut placed.row);
 				let mut glyphs = Vec::with_capacity(row.glyphs.len());
 				for glyph in &row.glyphs {
@@ -2851,9 +2861,14 @@ mod tests {
 		for id in 0..500 {
 			cache.get(Id(id), &format!("{id} {}", "日本語".repeat(2000)));
 		}
-		assert!(cache.entries.len() <= 64 && cache.bytes <= 1024 * 1024);
+		assert!(cache.entries.len() <= 512 && cache.bytes <= 1024 * 1024);
 		assert!(cache.get(Id(499), "||changed||").spoilers);
 		cache.retain(|_| false);
 		assert!(cache.entries.is_empty() && cache.bytes == 0);
+		for id in 0..500 {
+			cache.get(Id(id), "short message");
+		}
+		assert_eq!(cache.entries.len(), 500);
+		assert!(cache.bytes <= 1024 * 1024);
 	}
 }

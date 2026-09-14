@@ -8,9 +8,11 @@ use std::{
 
 pub type GifFrames = Vec<(Duration, std::sync::Arc<ColorImage>)>;
 const ANIMATION_BYTES: usize = 16 * 1024 * 1024;
+const ANIMATION_INTERVAL: Duration = Duration::from_millis(34);
 struct Animation {
 	frames: GifFrames,
 	started: Instant,
+	next_upload: Instant,
 	frame: usize,
 	bytes: usize,
 }
@@ -111,6 +113,7 @@ impl Avatars {
 			Animation {
 				frames,
 				started: Instant::now(),
+				next_upload: Instant::now(),
 				frame: usize::MAX,
 				bytes,
 			},
@@ -412,6 +415,11 @@ impl Avatars {
 			&& ctx.input(|input| input.focused)
 			&& let Some(animation) = self.animations.get_mut(key)
 		{
+			let now = Instant::now();
+			if now < animation.next_upload {
+				ctx.request_repaint_after(animation.next_upload - now);
+				return;
+			}
 			let total: Duration = animation.frames.iter().map(|(delay, _)| *delay).sum();
 			let mut elapsed = Duration::from_nanos(
 				(animation.started.elapsed().as_nanos() % total.as_nanos()) as u64,
@@ -423,8 +431,12 @@ impl Avatars {
 						entry.1.set(image.clone(), egui::TextureOptions::LINEAR);
 						self.bytes += entry.1.byte_size();
 						animation.frame = index;
+						animation.next_upload = now + ANIMATION_INTERVAL;
 					}
-					ctx.request_repaint_after(*delay - elapsed);
+					ctx.request_repaint_after(
+						(*delay - elapsed)
+							.max(animation.next_upload.saturating_duration_since(now)),
+					);
 					break;
 				}
 				elapsed -= *delay;
@@ -469,7 +481,9 @@ impl Avatars {
 		radius: u8,
 		cover: bool,
 	) -> bool {
-		self.advance_animation(ui.ctx(), key);
+		if ui.is_rect_visible(rect) {
+			self.advance_animation(ui.ctx(), key);
+		}
 		let Some(entry) = self.textures.get_mut(key) else {
 			return false;
 		};
@@ -1140,6 +1154,14 @@ mod tests {
 		);
 		output.textures_delta.clear();
 		assert_eq!(images.animations[&key].frame, 1);
+		// A different source frame cannot upload again before the existing deadline.
+		let animation = images.animations.get_mut(&key).unwrap();
+		animation.started = Instant::now();
+		animation.next_upload = Instant::now() + ANIMATION_INTERVAL;
+		let deadline = animation.next_upload;
+		images.gif_texture(&ctx, &gif, false);
+		assert_eq!(images.animations[&key].frame, 1);
+		assert_eq!(images.animations[&key].next_upload, deadline);
 		images.set_animation(false);
 		assert!(images.animations.is_empty());
 		assert!(images.gif_texture(&ctx, &gif, false).is_none());

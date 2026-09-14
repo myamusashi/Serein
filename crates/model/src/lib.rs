@@ -65,9 +65,17 @@ impl Serialize for Id {
 }
 impl<'de> Deserialize<'de> for Id {
 	fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-		String::deserialize(d)?
-			.parse()
-			.map_err(serde::de::Error::custom)
+		struct IdVisitor;
+		impl serde::de::Visitor<'_> for IdVisitor {
+			type Value = Id;
+			fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				f.write_str("a Discord ID string")
+			}
+			fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Id, E> {
+				value.parse().map_err(E::custom)
+			}
+		}
+		d.deserialize_str(IdVisitor)
 	}
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
