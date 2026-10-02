@@ -9,8 +9,8 @@
 mod screen;
 #[cfg(target_os = "linux")]
 use screen::{
-	AudioChunk, EncodedFrame, MAX_AUDIO_SAMPLES, MAX_ENCODED_BYTES, MAX_RAW_BYTES, RawFrame,
-	Settings, SourceId, encode_pixels, encoder, preview_frame,
+	AudioChunk, Codec, EncodedFrame, MAX_AUDIO_SAMPLES, MAX_ENCODED_BYTES, MAX_RAW_BYTES, RawFrame,
+	Settings, SourceId, encode_pixels, encode_yuv, encoder, preview_frame,
 };
 #[cfg(target_os = "linux")]
 #[path = "../src/screen/audio_linux.rs"]
@@ -27,6 +27,9 @@ mod portal_linux;
 #[cfg(target_os = "linux")]
 #[path = "../src/video.rs"]
 mod video;
+#[cfg(target_os = "linux")]
+#[path = "../src/video_av1.rs"]
+mod video_av1;
 // The shared screen module reaches the platform encoders' keyframe check through this path.
 #[cfg(target_os = "linux")]
 #[path = "../src/video_av1.rs"]
@@ -148,7 +151,13 @@ fn main() {
 	if std::env::args().any(|arg| arg == "--nvenc-exit") {
 		return nvenc_exit();
 	}
-	let mode = if std::env::args().any(|arg| arg == "--legacy-vaapi") {
+	let mode = if std::env::args().any(|arg| arg == "--av1-vaapi") {
+		Mode::VaAv1
+	} else if std::env::args().any(|arg| arg == "--av1-nvenc") {
+		Mode::NvidiaAv1
+	} else if std::env::args().any(|arg| arg == "--av1-nvenc-copy") {
+		Mode::NvidiaAv1Copy
+	} else if std::env::args().any(|arg| arg == "--legacy-vaapi") {
 		Mode::VaLegacy
 	} else {
 		Mode::Software
@@ -215,6 +224,16 @@ fn main() {
 				let pts = sample.buffer().unwrap().pts().expect("frame timestamp");
 				assert!(last_pts.is_none_or(|last| pts > last), "frames must keep advancing");
 				last_pts = Some(pts);
+				if mode.codec() == Codec::Av1 {
+					let buffer = sample.buffer().unwrap();
+					let data = buffer.map_readable().unwrap();
+					video_av1::validate_source(&data).unwrap();
+					if encoded == 0 {
+						assert!(!buffer.flags().contains(gst::BufferFlags::DELTA_UNIT));
+					}
+					encoded += 1;
+					continue;
+				}
 				if mode == Mode::VaLegacy {
 					let buffer = sample.buffer().unwrap();
 					let data = buffer.map_readable().unwrap();

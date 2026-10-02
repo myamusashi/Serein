@@ -17,6 +17,7 @@ pub fn setup(
 	preference: GpuPreference,
 	api: GraphicsApi,
 	_transparency: bool,
+	hardware_acceleration: bool,
 ) -> eframe::egui_wgpu::WgpuSetupCreateNew {
 	let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
 	let environment = wgpu::Backends::from_env();
@@ -39,7 +40,7 @@ pub fn setup(
 			.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
 	}
 	setup.native_adapter_selector = Some(std::sync::Arc::new(move |adapters, surface| {
-		select(preference, preferred, adapters, surface)
+		select(preference, preferred, hardware_acceleration, adapters, surface)
 	}));
 	let device_descriptor = setup.device_descriptor;
 	setup.device_descriptor = std::sync::Arc::new(move |adapter| {
@@ -95,10 +96,14 @@ fn selection_rank(
 	info: &wgpu::AdapterInfo,
 	prefer_integrated: bool,
 	preferred: Option<wgpu::Backend>,
-) -> (u8, (u8, u8, u8)) {
+	hardware_acceleration: bool,
+) -> (u8, u8, (u8, u8, u8)) {
+	let (accel, device, backend) = acceleration_rank(info, prefer_integrated, hardware_acceleration);
+	let (software, _, _) = rank(info, prefer_integrated);
 	(
-		u8::from(preferred.is_some_and(|backend| info.backend != backend)),
-		rank(info, prefer_integrated),
+		accel,
+		u8::from(preferred.is_some_and(|preferred| info.backend != preferred)),
+		(software, device, backend),
 	)
 }
 
@@ -161,6 +166,7 @@ pub fn describe(info: &wgpu::AdapterInfo) -> String {
 fn select(
 	preference: GpuPreference,
 	preferred: Option<wgpu::Backend>,
+	hardware_acceleration: bool,
 	adapters: &[wgpu::Adapter],
 	surface: Option<&wgpu::Surface<'_>>,
 ) -> Result<wgpu::Adapter, String> {
@@ -172,7 +178,14 @@ fn select(
 			surface.is_none_or(|surface| !surface.get_capabilities(adapter).formats.is_empty())
 		})
 		.collect();
-	usable.sort_by_key(|adapter| selection_rank(&adapter.get_info(), prefer_integrated, preferred));
+	usable.sort_by_key(|adapter| {
+		selection_rank(
+			&adapter.get_info(),
+			prefer_integrated,
+			preferred,
+			hardware_acceleration,
+		)
+	});
 	let Some(adapter) = usable.first() else {
 		let available = adapters
 			.iter()
@@ -206,7 +219,23 @@ fn select(
 			);
 		}
 	}
+	if !hardware_acceleration && info.device_type != wgpu::DeviceType::Cpu {
+		eprintln!("[Serein] Software rendering is unavailable; using a compatible GPU");
+	}
 	Ok((*adapter).clone())
+}
+
+fn acceleration_rank(
+	info: &wgpu::AdapterInfo,
+	prefer_integrated: bool,
+	enabled: bool,
+) -> (u8, u8, u8) {
+	let (device, backend) = rank(info, prefer_integrated);
+	(
+		u8::from(!enabled && info.device_type != wgpu::DeviceType::Cpu),
+		device,
+		backend,
+	)
 }
 
 #[cfg(test)]
@@ -239,11 +268,11 @@ mod tests {
 		);
 		let native = info(wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Vulkan);
 		let gl = info(wgpu::DeviceType::IntegratedGpu, wgpu::Backend::Gl);
-		assert!(selection_rank(&gl, false, preferred) < selection_rank(&native, false, preferred));
+		assert!(selection_rank(&gl, false, preferred, true) < selection_rank(&native, false, preferred, true));
 		// If the preferred adapter cannot present, the remaining candidates retain Automatic ranking.
 		let software = info(wgpu::DeviceType::Cpu, wgpu::Backend::Vulkan);
 		assert!(
-			selection_rank(&native, false, preferred) < selection_rank(&software, false, preferred)
+			selection_rank(&native, false, preferred, true) < selection_rank(&software, false, preferred, true)
 		);
 	}
 
@@ -327,6 +356,20 @@ mod tests {
 		);
 		assert!(rank(&native, false) < rank(&opengl, false));
 		assert!(!software(&native) && !software(&opengl));
+	}
+
+	#[test]
+	fn disabled_acceleration_prefers_software_over_every_gpu() {
+		let cpu = info(wgpu::DeviceType::Cpu, wgpu::Backend::Vulkan);
+		for device in [
+			wgpu::DeviceType::DiscreteGpu,
+			wgpu::DeviceType::IntegratedGpu,
+			wgpu::DeviceType::VirtualGpu,
+		] {
+			let gpu = info(device, wgpu::Backend::Vulkan);
+			assert!(acceleration_rank(&cpu, false, false) < acceleration_rank(&gpu, false, false));
+			assert!(acceleration_rank(&gpu, false, true) < acceleration_rank(&cpu, false, true));
+		}
 	}
 
 	#[test]

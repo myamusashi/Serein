@@ -536,6 +536,7 @@ fn main() -> eframe::Result {
 	let (
 		gpu_preference,
 		graphics_api,
+		hardware_acceleration,
 		transparency_available,
 		hide_window_decorations,
 		window_geometry,
@@ -547,6 +548,7 @@ fn main() -> eframe::Result {
 		(
 			value.gpu_preference,
 			value.graphics_api,
+			value.hardware_acceleration,
 			value.transparency_blur,
 			value.hide_window_decorations || value.custom_title_bar,
 			value.window_geometry,
@@ -605,6 +607,7 @@ fn main() -> eframe::Result {
 				gpu_preference,
 				graphics_api,
 				transparency_available,
+				hardware_acceleration.app,
 			)),
 			// Keep cursor-driven redraws synchronized even where AutoVsync selects FifoRelaxed.
 			surface: eframe::egui_wgpu::SurfaceConfig {
@@ -623,6 +626,10 @@ fn main() -> eframe::Result {
 		Box::new(move |cc| {
 			let mut desktop =
 				Desktop::new(cc, demo, frame_sample, transparency_available, preferences)?;
+			desktop.messaging.hardware_app_fallback = !hardware_acceleration.app
+				&& cc.wgpu_render_state.as_ref().is_some_and(|render| {
+					render.adapter.get_info().device_type != eframe::wgpu::DeviceType::Cpu
+				});
 			let wake = cc.egui_ctx.clone();
 			instance.listen(
 				desktop.window.clone(),

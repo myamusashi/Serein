@@ -63,6 +63,7 @@ impl Settings {
 			gpu_preference: ui.gpu_preference,
 			graphics_api: ui.graphics_api,
 			steady_refresh_rate: ui.steady_refresh_rate,
+			hardware_acceleration: ui.hardware_acceleration,
 			primary_color: ui.primary_color,
 			transparency_blur: ui.transparency_blur,
 			transparency: ui.transparency,
@@ -118,6 +119,7 @@ impl Settings {
 		ui.gpu_preference = value.gpu_preference;
 		ui.graphics_api = value.graphics_api;
 		ui.steady_refresh_rate = value.steady_refresh_rate;
+		ui.hardware_acceleration = value.hardware_acceleration;
 		ui.primary_color = value.primary_color;
 		ui.transparency_blur = value.transparency_blur;
 		ui.transparency = value.transparency;
@@ -549,6 +551,26 @@ mod tests {
 		settings.observe(&ui);
 		assert!(!settings.current.message_requests_collapsed);
 		assert!(settings.state.dirty);
+	}
+
+	#[test]
+	fn acceleration_defaults_migrate_and_changes_are_saved() {
+		let preferences: AppPreferences = serde_json::from_str("{}").unwrap();
+		assert!(preferences.hardware_acceleration.app);
+		assert!(preferences.hardware_acceleration.screen_share);
+		let mut settings = Settings::default();
+		let mut ui = ui::MessagingUi::default();
+		ui.hardware_acceleration.app = false;
+		ui.hardware_acceleration.screen_share = false;
+		settings.observe(&ui);
+		assert!(settings.state.dirty);
+		assert_eq!(
+			settings.current.hardware_acceleration,
+			ui.hardware_acceleration
+		);
+		let mut restored = ui::MessagingUi::default();
+		settings.apply(&mut restored);
+		assert_eq!(restored.hardware_acceleration, ui.hardware_acceleration);
 	}
 
 	#[test]

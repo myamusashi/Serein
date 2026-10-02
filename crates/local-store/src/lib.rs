@@ -83,6 +83,7 @@ pub struct AppPreferences {
 	/// Repaint every display refresh while the window is focused, so variable refresh rate
 	/// displays hold one rate; older preferences deserialize with it off.
 	pub steady_refresh_rate: bool,
+	pub hardware_acceleration: model::HardwareAcceleration,
 	/// Device-local, account-independent keyboard bindings.
 	pub keybinds: model::Keybinds,
 	/// Expanded server folders, bounded so one device preference stays small.
@@ -139,6 +140,7 @@ impl Default for AppPreferences {
 			gpu_preference: Default::default(),
 			graphics_api: Default::default(),
 			steady_refresh_rate: false,
+			hardware_acceleration: Default::default(),
 			keybinds: Default::default(),
 			expanded_folders: Vec::new(),
 			user_volumes: Vec::new(),
@@ -2268,6 +2270,10 @@ mod tests {
 			gpu_preference: model::GpuPreference::PowerSaving,
 			graphics_api: model::GraphicsApi::OpenGl,
 			steady_refresh_rate: true,
+			hardware_acceleration: model::HardwareAcceleration {
+				app: false,
+				screen_share: false,
+			},
 			..Default::default()
 		};
 		store.save_app_preferences(&value).unwrap();
