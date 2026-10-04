@@ -2051,6 +2051,23 @@ message's outer identity. Signed paths and queries remain intact, and the existi
 origin, metadata, file-size and transformation guards remain enforced. Synthetic
 checks cover both forms and both hosts; the reported live message remains unverified.
 
+### Storage backend selector (October 3, 2026)
+
+Discord serves attachment CDN links with a `backend` query key naming the serving
+bucket, for example `?backend=b2&ex=…&is=…&hm=…`. The signed-query admission check
+listed only `ex`, `is` and `hm`, so every such video failed before networking with
+“Video attachment unavailable”, and the same link failed an explicit save with
+“Attachment download unavailable”. Explicit saves and playback share one validator,
+so that pairing distinguishes an admission rejection from a decoder failure.
+
+`backend` selects storage for the same signed object and never transforms the
+response, so it is now admitted. Rendition keys that do change the returned object —
+`format`, `width`, `size`, `quality` — remain rejected, as do foreign hosts,
+credentials, non-HTTPS URLs, fragments, mismatched attachment IDs and encoded path
+separators. Synthetic checks cover both the accepted selector and the rejected
+rendition keys; the reported link was confirmed by its published query string only,
+and live Discord playback of it remains unverified.
+
 ## Optional REST API proxy plugin (preview)
 
 The API Proxy community plugin can select an HTTP/HTTPS CONNECT proxy

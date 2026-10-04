@@ -114,6 +114,23 @@ nix run github:ViceVerse-cz/Serein#serein
 nix profile install github:ViceVerse-cz/Serein#serein
 ```
 
+or
+
+```nix
+serein = {
+    url = "github:ViceVerse-cz/Serein";
+    inputs.follow.nixpkgs = "nixpkgs";
+};
+```
+
+Then declare the package to systemPackages.
+
+```nix
+environment.systemPackages = [
+    inputs.serein.packages.${pkgs.stdenv.hostPlatform.system}.default
+];
+```
+
 Nix installs are updated through Nix, not the in-app updater. On macOS the build produces an unsigned, non-notarized `Serein.app`. See the [Nix package guide](nix/README.md) for the development shell and details.
 
 #### 5. Standalone AppImage (Portable)
