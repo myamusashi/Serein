@@ -48,6 +48,58 @@ impl Drop for Decoder {
 		let _ = self.pipeline.set_state(gst::State::Null);
 	}
 }
+/// Installed decoders that move H.264 and friends off the CPU. `va` owns `vah264dec` and the
+/// rest of the VA-API element family, so raising its rank lifts all of them at once.
+const ACCELERATED_FACTORIES: &[&str] = &[
+	"va",
+	"v4l2h264dec",
+	"v4l2slh264dec",
+	"nvh264dec",
+	"nvh264sldec",
+];
+
+/// Raises the autoplug rank of every installed hardware decoder, and puts it back on drop.
+/// Ranking is process-global, so a failed accelerated attempt must not leave a later
+/// GStreamer user in this process with the worse ordering.
+struct RankGuard(Vec<(gst::ElementFactory, gst::Rank)>);
+impl RankGuard {
+	fn raise() -> Self {
+		let mut saved = Vec::new();
+		for name in ACCELERATED_FACTORIES {
+			let Some(factory) = gst::ElementFactory::find(name) else {
+				continue;
+			};
+			let rank = factory.rank();
+			factory.set_rank(rank + 10);
+			saved.push((factory, rank));
+		}
+		Self(saved)
+	}
+	fn is_empty(&self) -> bool {
+		self.0.is_empty()
+	}
+}
+impl Default for RankGuard {
+	fn default() -> Self {
+		Self(Vec::new())
+	}
+}
+impl Drop for RankGuard {
+	fn drop(&mut self) {
+		for (factory, rank) in self.0.drain(..) {
+			factory.set_rank(rank);
+		}
+	}
+}
+
+/// Take the anonymous stream back out of a failed attempt so the retry can rewind it.
+fn take_source(shared: &Arc<Shared>) -> Option<Box<dyn ReadSeek>> {
+	let mut guard = shared.source.lock().ok()?;
+	Some(std::mem::replace(
+		&mut *guard,
+		Box::new(std::io::Cursor::new(Vec::new())) as Box<dyn ReadSeek>,
+	))
+}
 
 impl Decoder {
 	pub fn open(mut source: Box<dyn ReadSeek>) -> Result<Self, &'static str> {
@@ -64,13 +116,66 @@ impl Decoder {
 			return Err(UNSUPPORTED);
 		}
 		gst::init().map_err(|_| UNSUPPORTED)?;
+		// A GPU decoder costs far less CPU, but it is missing on plenty of machines and broken
+		// on others. Try it first and fall back exactly as the Windows backend does, keeping
+		// the software error so a machine without acceleration still sees what it always saw.
+		let mut software = None;
+		let mut source = source;
+		for accelerated in [true, false] {
+			match Self::open_once(source, length, accelerated) {
+				Ok(decoder) => return Ok(decoder),
+				Err((recovered, error)) => {
+					source = recovered;
+					if !accelerated {
+						software = Some(error);
+					}
+				}
+			}
+		}
+		Err(software.unwrap_or(INVALID))
+	}
+	/// One attempt, handing the stream back on failure so the caller can rewind and retry.
+	fn open_once(
+		source: Box<dyn ReadSeek>,
+		length: u64,
+		accelerated: bool,
+	) -> Result<Self, (Box<dyn ReadSeek>, &'static str)> {
+		let ranks = if accelerated {
+			RankGuard::raise()
+		} else {
+			RankGuard::default()
+		};
+		// Nothing installed to accelerate with; do not spend a pipeline on the attempt.
+		if accelerated && ranks.is_empty() {
+			return Err((source, INVALID));
+		}
 		let shared = Arc::new(Shared {
 			source: Mutex::new(source),
 			position: AtomicU64::new(0),
 			length,
 			failed: AtomicBool::new(false),
 		});
+		match Self::build(shared.clone()) {
+			Ok(decoder) => Ok(decoder),
+			Err(error) => Err((
+				take_source(&shared)
+					.unwrap_or_else(|| Box::new(std::io::Cursor::new(Vec::new()))),
+				error,
+			)),
+		}
+	}
+	/// One attempt. A failed attempt stops its pipeline before returning, so the streaming
+	/// threads release the `appsrc` callbacks and the caller can take the stream back.
+	fn build(shared: Arc<Shared>) -> Result<Self, &'static str> {
 		let pipeline = gst::Pipeline::new();
+		let result = Self::assemble(shared, pipeline.clone());
+		if result.is_err() {
+			let _ = pipeline.set_state(gst::State::Null);
+		}
+		result
+	}
+	fn assemble(shared: Arc<Shared>, pipeline: gst::Pipeline) -> Result<Self, &'static str> {
+		let length = shared.length;
 		let appsrc = gst_app::AppSrc::builder().build();
 		appsrc.set_stream_type(gst_app::AppStreamType::RandomAccess);
 		appsrc.set_format(gst::Format::Bytes);
@@ -267,9 +372,11 @@ impl Decoder {
 		if stride < row || data.len() < stride * (h - 1) + row || row * h > MAX_BYTES {
 			return Err(INVALID);
 		}
-		let mut rgba = vec![0; row * h];
-		for (source, target) in data.chunks(stride).zip(rgba.chunks_exact_mut(row)) {
-			target.copy_from_slice(&source[..row]);
+		// Every byte is overwritten below, so the frame is appended into its own allocation
+		// instead of zero-filling ~8 MB that is immediately discarded.
+		let mut rgba = Vec::with_capacity(row * h);
+		for source in data.chunks(stride).take(h) {
+			rgba.extend_from_slice(&source[..row]);
 		}
 		Ok(Poll::Ready(Some(Sample::Video {
 			pts: self.last_video_pts,
@@ -567,4 +674,89 @@ mod tests {
 		assert!(wait_for_sample(&mut decoder, Decoder::poll_video).is_some());
 		assert!(Decoder::open(Box::new(std::io::Cursor::new(vec![0_u8; 64]))).is_err());
 	}
+
+	/// Drains one full decode of the offline fixture, timing the host-side frame handling that
+	/// `poll_video` performs. `poll_audio` is drained alongside so the sibling queue cannot
+	/// stall the video branch, exactly as the player does.
+	fn drain(accelerated: bool) -> Result<(usize, u128), &'static str> {
+		let length = FIXTURE.len() as u64;
+		let mut decoder = Decoder::open_once(
+			Box::new(std::io::Cursor::new(FIXTURE)),
+			length,
+			accelerated,
+		)
+		.map_err(|(_, error)| error)?;
+		let mut frames = 0;
+		let started = std::time::Instant::now();
+		while !decoder.video_done || !decoder.audio_done {
+			let mut progressed = false;
+			for _ in 0..16 {
+				match decoder.poll_audio()? {
+					Poll::Ready(Some(_)) => progressed = true,
+					Poll::Ready(None) | Poll::Pending => break,
+				}
+			}
+			if let Poll::Ready(Some(Sample::Video {
+				rgba,
+				width,
+				height,
+				..
+			})) = decoder.poll_video()?
+			{
+				assert_eq!(rgba.len(), (width * height * 4) as usize);
+				frames += 1;
+				progressed = true;
+			}
+			if !progressed {
+				std::thread::sleep(std::time::Duration::from_millis(1));
+			}
+		}
+		Ok((frames, started.elapsed().as_micros()))
+	}
+
+	fn report(label: &str, samples: &[u128], frames: usize) {
+		let mut sorted: Vec<u128> = samples.to_vec();
+		sorted.sort_unstable();
+		let median = sorted[sorted.len() / 2];
+		let per_frame = median as f64 / frames.max(1) as f64;
+		println!(
+			"{label}: {frames} frames; batches_us={samples:?}; median_batch_us={median}; \
+			 median_us_per_frame={per_frame:.1}; share_of_1080p60_budget={:.1}%",
+			per_frame * 60. / 1000.,
+		);
+	}
+
+	#[test]
+	#[ignore = "release video CPU benchmark; one warmup and five measured batches"]
+	fn benchmark_video_frame_preparation() {
+		let (frames, _) = drain(true).expect("fixture decodes");
+		let samples: Vec<u128> = (0..5).map(|_| drain(true).expect("fixture decodes").1).collect();
+		report("video_frame_preparation", &samples, frames);
+	}
+
+	#[test]
+	#[ignore = "release decoder backend comparison; needs an installed hardware decoder to differ"]
+	fn benchmark_linux_decoder_backends() {
+		gst::init().expect("gstreamer initializes");
+		let installed: Vec<&str> = ACCELERATED_FACTORIES
+			.iter()
+			.copied()
+			.filter(|name| gst::ElementFactory::find(name).is_some())
+			.collect();
+		println!("hardware decoder factories installed: {installed:?}");
+		if installed.is_empty() {
+			println!("accelerated attempt skipped: no hardware decoder factory on this machine");
+		}
+		for (label, accelerated) in [("accelerated", true), ("software", false)] {
+			let Ok((frames, _)) = drain(accelerated) else {
+				println!("decoder_backend[{label}]: attempt failed, skipped");
+				continue;
+			};
+			let samples: Vec<u128> = (0..5)
+				.map(|_| drain(accelerated).expect("repeated decode succeeds").1)
+				.collect();
+			report(&format!("decoder_backend[{label}]"), &samples, frames);
+		}
+	}
+
 }

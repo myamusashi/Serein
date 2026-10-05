@@ -33,10 +33,12 @@ pub struct VideoUi {
 	pub seen: bool,
 	pub volume: f32,
 	texture: Option<egui::TextureHandle>,
-	/// Staging pixels for the current frame. The renderer drops its reference after the
-	/// upload, so the same allocation is refilled each frame instead of reallocating up to
-	/// 8 MB per frame (1080p at 60 fps churned ~500 MB/s through the allocator).
-	frame: Option<std::sync::Arc<egui::ColorImage>>,
+	/// Staging pixels for the current frame, as a small ring. The renderer drops its
+	/// reference after the upload, so a buffer nobody else holds is refilled in place instead
+	/// of reallocating up to 8 MB per frame (1080p at 60 fps churned ~500 MB/s through the
+	/// allocator). Rotating past a buffer still pinned by an in-flight upload keeps the
+	/// per-frame deep copy off the UI thread instead of racing every frame against it.
+	frame: Vec<std::sync::Arc<egui::ColorImage>>,
 	/// Vertical transparent-to-black ramp behind the overlay controls.
 	shade: Option<egui::TextureHandle>,
 	/// Keyboard focus rested on an overlay control last frame, so keep the overlay visible.
@@ -57,7 +59,7 @@ impl Default for VideoUi {
 			seen: false,
 			volume: 1.0,
 			texture: None,
-			frame: None,
+			frame: Vec::new(),
 			shade: None,
 			controls_focused: false,
 			fullscreen: None,
@@ -70,7 +72,7 @@ impl VideoUi {
 		self.exit_fullscreen();
 		self.active = None;
 		self.texture = None;
-		self.frame = None;
+		self.frame.clear();
 		self.state = VideoState::Idle;
 		self.position = 0.0;
 		self.duration = 0.0;
@@ -144,25 +146,48 @@ impl VideoUi {
 		{
 			return false;
 		}
-		let frame = self.frame.get_or_insert_with(|| {
-			std::sync::Arc::new(egui::ColorImage::filled(
+		// Prefer a staging buffer the renderer has already released. `Arc::make_mut` would
+		// otherwise deep-copy the whole image on every frame the upload has not drained yet,
+		// which is the common case while frames arrive faster than they are consumed.
+		const RING: usize = 3;
+		let mut frame = self
+			.frame
+			.iter()
+			.find(|buffer| std::sync::Arc::strong_count(buffer) == 1)
+			.cloned();
+		if frame.is_none() && self.frame.len() < RING {
+			let spare = std::sync::Arc::new(egui::ColorImage::filled(
 				[width, height],
 				egui::Color32::BLACK,
-			))
-		});
-		// Reuses the buffer once the previous upload released it; clones only if the
-		// renderer still holds the last frame.
-		let image = std::sync::Arc::make_mut(frame);
-		image.size = [width, height];
-		image.source_size = egui::vec2(width as f32, height as f32);
-		image.pixels.clear();
-		image.pixels.extend(
-			rgba.as_chunks::<4>()
-				.0
-				.iter()
-				.map(|&[r, g, b, a]| egui::Color32::from_rgba_unmultiplied(r, g, b, a)),
-		);
-		let image = std::sync::Arc::clone(frame);
+			));
+			self.frame.push(spare.clone());
+			frame = Some(spare);
+		}
+		// Every buffer is pinned by an in-flight upload; reuse the oldest and accept the one
+		// deep copy `Arc::make_mut` would have performed anyway.
+		let mut frame = frame.unwrap_or_else(|| std::sync::Arc::clone(&self.frame[0]));
+		{
+			let image = std::sync::Arc::make_mut(&mut frame);
+			image.size = [width, height];
+			image.source_size = egui::vec2(width as f32, height as f32);
+			image.pixels.clear();
+			image.pixels.extend(
+				rgba.as_chunks::<4>()
+					.0
+					.iter()
+					.map(|&[r, g, b, a]| egui::Color32::from_rgba_unmultiplied(r, g, b, a)),
+			);
+		}
+		let image = frame;
+		// Move the buffer just used to the back, so a pinned one is retried only after the
+		// others have been filled.
+		if let Some(used) = self
+			.frame
+			.iter()
+			.position(|buffer| std::sync::Arc::ptr_eq(buffer, &image))
+		{
+			self.frame.rotate_left(used + 1);
+		}
 		if let Some(texture) = &mut self.texture {
 			texture.set(image, egui::TextureOptions::LINEAR);
 		} else {
@@ -182,7 +207,7 @@ impl VideoUi {
 			_ => {
 				self.active = Some((message.channel, message.id, attachment.clone()));
 				self.texture = None;
-				self.frame = None;
+				self.frame.clear();
 				self.state = VideoState::Loading;
 				self.position = 0.0;
 				self.duration = 0.0;
@@ -854,4 +879,53 @@ mod tests {
 			assert!(matches!(video.command, Some(VideoCommand::Stop)));
 		}
 	}
+
+	#[test]
+	#[ignore = "release accept_frame benchmark; one warmup and five measured batches"]
+	fn benchmark_accept_frame() {
+		let attachment = Attachment {
+			id: Id(3),
+			filename: "synthetic-clip.MOV".into(),
+			description: None,
+			content_type: Some("video/mp4".into()),
+			size: 128,
+			media: model::EmbedMedia {
+				width: 1920,
+				height: 1080,
+				..Default::default()
+			},
+			spoiler: false,
+			duration_ms: None,
+			waveform: Vec::new(),
+		};
+		let ctx = egui::Context::default();
+		let (width, height) = (1920_usize, 1080_usize);
+		let rgba = vec![128_u8; width * height * 4];
+		const BATCH: usize = 8;
+		let mut samples = Vec::new();
+		let mut ring = 0;
+		for batch in 0..6 {
+			let mut video = VideoUi::default();
+			video.active = Some((Id(1), Id(2), attachment.clone()));
+			let started = std::time::Instant::now();
+			for _ in 0..BATCH {
+				assert!(video.accept_frame(&ctx, width, height, &rgba));
+			}
+			if batch > 0 {
+				samples.push(started.elapsed().as_micros());
+			}
+			ring = video.frame.len();
+		}
+		let mut sorted = samples.clone();
+		sorted.sort_unstable();
+		let median = sorted[sorted.len() / 2];
+		println!(
+			"accept_frame: {BATCH} frames per batch; staging_buffers={ring}; \
+			 batches_us={samples:?}; median_batch_us={median}; \
+			 median_us_per_frame={:.1}; share_of_1080p60_budget={:.2}%",
+			median as f64 / BATCH as f64,
+			median as f64 / BATCH as f64 * 60. / 1000.,
+		);
+	}
+
 }

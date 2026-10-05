@@ -703,13 +703,36 @@ fn rgba_frame(
 	} else {
 		w
 	};
-	let mut rgba = vec![0; w * h * 4];
-	for y in 0..h {
-		let row = if stride < 0 {
+	// Every byte is written below, so the picture is grown into its own allocation instead of
+	// zero-filling ~8 MB per frame that the swizzle immediately overwrites. An unrotated frame
+// is filled in output order; the rotated cases scatter, so they still index in place.
+	let row_of = |y: usize| {
+		if stride < 0 {
 			buffer_height as usize - 1 - y - crop.1 as usize
 		} else {
 			y + crop.1 as usize
-		};
+		}
+	};
+	let mut rgba = Vec::with_capacity(w * h * 4);
+	if rotation == 0 {
+		for y in 0..h {
+			let row = row_of(y) * pitch + crop.0 as usize * 4;
+			for x in 0..w {
+				let source = row + x * 4;
+				rgba.extend_from_slice(&[
+					bytes[source + 2],
+					bytes[source + 1],
+					bytes[source],
+					255,
+				]);
+			}
+		}
+		return Ok(rgba);
+	}
+	// Rotated output is addressed by index, so the destination has to exist before it is written.
+	rgba.resize(w * h * 4, 0);
+	for y in 0..h {
+		let row = row_of(y);
 		for x in 0..w {
 			let (dx, dy) = match rotation {
 				90 => (h - 1 - y, x),
