@@ -554,18 +554,12 @@ pub(super) unsafe fn copy_rgba(
 			Err(INVALID)
 		} else {
 			let source = std::slice::from_raw_parts(base.cast::<u8>(), total);
-			let mut rgba = vec![0; width * height * 4];
-			for (row, target) in source
-				.chunks_exact(stride)
-				.zip(rgba.chunks_exact_mut(row_bytes))
-			{
-				for (pixel, out) in row[..row_bytes]
-					.as_chunks::<4>()
-					.0
-					.iter()
-					.zip(target.as_chunks_mut::<4>().0.iter_mut())
-				{
-					*out = [pixel[2], pixel[1], pixel[0], 255];
+			// Every byte is appended below, so the picture is grown into its own allocation
+			// instead of zero-filling ~8 MB per frame that the swizzle immediately overwrites.
+			let mut rgba = Vec::with_capacity(width * height * 4);
+			for row in source.chunks_exact(stride).take(height) {
+				for pixel in row[..row_bytes].as_chunks::<4>().0 {
+					rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
 				}
 			}
 			Ok((w, h, rgba))

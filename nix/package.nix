@@ -30,6 +30,9 @@
     libpulseaudio,
     libglvnd,
     alsa-lib,
+    libva,
+    vainfo,
+    libva-intel-driver,
     gst_all_1,
     pipewire,
     libX11,
@@ -61,8 +64,10 @@
         libGL
         libGLX
         libglvnd
+        libva
+        vainfo
+        libva-intel-driver
     ];
-
     windowingDeps = [
         wayland
         libxkbcommon
@@ -124,9 +129,7 @@ in
             ];
 
         buildInputs =
-            lib.optionals isLinux (
-                toolkitDeps ++ graphicsDeps ++ windowingDeps ++ audioDeps ++ gstPlugins
-            )
+            lib.optionals isLinux (toolkitDeps ++ graphicsDeps ++ windowingDeps ++ audioDeps ++ gstPlugins)
             ++ lib.optionals isDarwin [
                 apple-sdk_15
                 swiftPackages.stdlib

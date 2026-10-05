@@ -435,9 +435,12 @@ pub(crate) fn original_url(attachment: &Attachment) -> Option<url::Url> {
 		&& !["%2f", "%5c"]
 			.iter()
 			.any(|escape| filename.to_ascii_lowercase().contains(escape))
+		// `backend` selects the storage bucket for the same signed object; it never
+		// transforms the response. Rendition keys such as `format`, `width`, `size`
+		// and `quality` still fail the admission check below.
 		&& url
 			.query_pairs()
-			.all(|(name, _)| matches!(name.as_ref(), "ex" | "is" | "hm")))
+		.all(|(name, _)| matches!(name.as_ref(), "ex" | "is" | "hm" | "backend")))
 	.then_some(url)
 }
 
@@ -967,6 +970,35 @@ mod tests {
 			assert!(original_url(&video).is_none());
 		}
 	}
+	#[test]
+	fn storage_backend_selector_does_not_block_video_links() {
+		let mut video = attachment();
+		video.filename = "2026-10-03_150804_compressed.mp4".into();
+		video.content_type = Some("video/mp4".into());
+		// Discord tags attachment CDN links with the serving bucket. It selects storage for
+		// the same signed object, so it must survive the signed-query admission check.
+		for backend in ["b2", "b3"] {
+			let query = format!("backend={backend}&ex=6ac219a2&is=6ac0c822&hm=ce8d7d8");
+			video.media.url = Some(format!(
+				"https://cdn.discordapp.com/attachments/1/2/2026-10-03_150804_compressed.mp4?{query}"
+			));
+			assert_eq!(
+				original_url(&video).map(|url| url.as_str().to_owned()),
+				Some(format!(
+					"https://cdn.discordapp.com/attachments/1/2/2026-10-03_150804_compressed.mp4?{query}"
+				)),
+				"backend={backend}"
+			);
+		}
+		// A rendition selector does change the returned object, so it stays rejected.
+		for rendition in ["format=webp", "width=640", "size=512", "quality=80"] {
+			video.media.url = Some(format!(
+				"https://cdn.discordapp.com/attachments/1/2/2026-10-03_150804_compressed.mp4?backend=b2&ex=6ac219a2&is=6ac0c822&hm=ce8d7d8&{rendition}"
+			));
+			assert!(original_url(&video).is_none(), "{rendition}");
+		}
+	}
+
 	#[test]
 	fn message_scoped_attachment_paths_keep_admission_guards() {
 		let mut file = attachment();
