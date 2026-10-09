@@ -27,8 +27,11 @@
                 system,
                 ...
             }: {
-                packages.serein = pkgs.callPackage ./nix/package.nix {};
-                packages.default = config.packages.serein;
+                packages = {
+                    serein = pkgs.callPackage ./nix/package.nix {};
+                    default = config.packages.serein;
+                    release = pkgs.callPackage ./nix/release-package.nix {};
+                };
 
                 devShells.default = pkgs.mkShell {
                     name = "serein-dev";
