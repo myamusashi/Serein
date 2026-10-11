@@ -570,25 +570,29 @@ impl Bridge {
 			}
 			self.host = Some(ExtensionHost::new(root));
 		}
-		if let Some(update) = self
+		if let Some(changes) = self
 			.live_theme_watcher
 			.as_ref()
-			.and_then(LiveThemeWatcher::take_update)
+			.map(LiveThemeWatcher::take_changes)
 		{
-			match update {
-				LiveThemeUpdate::Loaded {
-					theme,
-					background_image,
-				} => {
-					self.live_theme = Some((theme, background_image));
-					self.apply_theme(ctx);
-				}
-				LiveThemeUpdate::Cleared => {
-					if self.live_theme.take().is_some() {
+			if let Some(update) = changes.update {
+				match update {
+					LiveThemeUpdate::Loaded {
+						theme,
+						background_image,
+					} => {
+						self.live_theme = Some((theme, background_image));
 						self.apply_theme(ctx);
 					}
+					LiveThemeUpdate::Cleared => {
+						if self.live_theme.take().is_some() {
+							self.apply_theme(ctx);
+						}
+					}
 				}
-				LiveThemeUpdate::Failed(error) => messaging.extensions.report_error(error),
+			}
+			if let Some(error) = changes.error {
+				messaging.extensions.report_error(error);
 			}
 		}
 		let scope = (state.generation, account.clone());

@@ -71,41 +71,88 @@ pub(super) enum LiveThemeUpdate {
 		background_image: Option<Arc<eframe::egui::ColorImage>>,
 	},
 	Cleared,
-	Failed(String),
+}
+
+#[derive(Default)]
+pub(super) struct LiveThemeChanges {
+	pub update: Option<LiveThemeUpdate>,
+	pub error: Option<String>,
 }
 
 /// Watches the user-managed live theme package without exposing Serein's installed-package store.
 pub(super) struct LiveThemeWatcher {
-	latest: Arc<Mutex<Option<LiveThemeUpdate>>>,
+	pending: Arc<Mutex<LiveThemeChanges>>,
 	stop: Option<mpsc::Sender<()>>,
 	thread: Option<JoinHandle<()>>,
+}
+
+enum LiveThemeLoad {
+	Loaded {
+		update: LiveThemeUpdate,
+		digest: Option<String>,
+	},
+	Unchanged,
 }
 
 impl LiveThemeWatcher {
 	pub fn new(root: &Path, context: eframe::egui::Context) -> Result<Self, String> {
 		let path = root.join(LIVE_THEME_FILE);
-		let latest = Arc::new(Mutex::new(None));
-		let updates = latest.clone();
+		let pending = Arc::new(Mutex::new(LiveThemeChanges::default()));
+		let changes = pending.clone();
 		let (stop, stopped) = mpsc::channel();
 		let thread = std::thread::Builder::new()
 			.name("serein-live-theme".into())
 			.spawn(move || {
 				let mut observed = None;
+				let mut observed_digest = None;
+				let mut reported_failure = None;
 				loop {
 					let stamp = live_theme_stamp(&path);
 					if observed.as_ref() != Some(&stamp) {
-						observed = Some(stamp.clone());
-						let update = match stamp {
-							LiveThemeStamp::Missing => LiveThemeUpdate::Cleared,
+						let result = match stamp {
+							LiveThemeStamp::Missing => Ok(LiveThemeLoad::Loaded {
+								update: LiveThemeUpdate::Cleared,
+								digest: None,
+							}),
 							LiveThemeStamp::Unreadable => {
-								LiveThemeUpdate::Failed("Live theme package cannot be read".into())
+								Err("Live theme package cannot be read".into())
 							}
-							LiveThemeStamp::Present { .. } => load_live_theme(&path),
+							LiveThemeStamp::Present { .. } => {
+								load_live_theme(&path, observed_digest.as_deref())
+							}
 						};
-						if let Ok(mut latest) = updates.lock() {
-							*latest = Some(update);
+						match result {
+							Ok(LiveThemeLoad::Loaded { update, digest }) => {
+								observed = Some(stamp);
+								observed_digest = digest;
+								reported_failure = None;
+								if let Ok(mut pending) = changes.lock() {
+									pending.update = Some(update);
+									pending.error = None;
+								}
+								context.request_repaint();
+							}
+							Ok(LiveThemeLoad::Unchanged) => {
+								observed = Some(stamp);
+								reported_failure = None;
+								if changes
+									.lock()
+									.is_ok_and(|mut pending| pending.error.take().is_some())
+								{
+									context.request_repaint();
+								}
+							}
+							Err(error) => {
+								let failure = (stamp, error.clone());
+								if reported_failure.as_ref() != Some(&failure) {
+									reported_failure = Some(failure);
+									if let Ok(mut pending) = changes.lock() {
+										pending.error = Some(error);
+									}
+									context.request_repaint();
+								}
+							}
 						}
-						context.request_repaint();
 					}
 					match stopped.recv_timeout(LIVE_THEME_POLL_INTERVAL) {
 						Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -115,14 +162,17 @@ impl LiveThemeWatcher {
 			})
 			.map_err(|_| "Cannot start live theme watcher".to_owned())?;
 		Ok(Self {
-			latest,
+			pending,
 			stop: Some(stop),
 			thread: Some(thread),
 		})
 	}
 
-	pub fn take_update(&self) -> Option<LiveThemeUpdate> {
-		self.latest.lock().ok()?.take()
+	pub fn take_changes(&self) -> LiveThemeChanges {
+		self.pending
+			.lock()
+			.map(|mut pending| std::mem::take(&mut *pending))
+			.unwrap_or_default()
 	}
 }
 
@@ -135,22 +185,26 @@ impl Drop for LiveThemeWatcher {
 	}
 }
 
-fn load_live_theme(path: &Path) -> LiveThemeUpdate {
-	let result = (|| {
-		let bytes = read_bounded(path, MAX_PACKAGE)?;
-		let package = extensions::parse_package(&bytes)
-			.map_err(|_| "Live theme package is invalid".to_owned())?;
-		if package.manifest.kind != ExtensionKind::Theme {
-			return Err("Live theme file must contain a theme package".into());
-		}
-		let background_image = package_background(&package)?;
-		let theme = package.theme.ok_or("Live theme package has no theme")?;
-		Ok(LiveThemeUpdate::Loaded {
+fn load_live_theme(path: &Path, previous_digest: Option<&str>) -> Result<LiveThemeLoad, String> {
+	let bytes = read_bounded(path, MAX_PACKAGE)?;
+	let current_digest = digest(&bytes);
+	if previous_digest == Some(&current_digest) {
+		return Ok(LiveThemeLoad::Unchanged);
+	}
+	let package = extensions::parse_package(&bytes)
+		.map_err(|_| "Live theme package is invalid".to_owned())?;
+	if package.manifest.kind != ExtensionKind::Theme {
+		return Err("Live theme file must contain a theme package".into());
+	}
+	let background_image = package_background(&package)?;
+	let theme = package.theme.ok_or("Live theme package has no theme")?;
+	Ok(LiveThemeLoad::Loaded {
+		update: LiveThemeUpdate::Loaded {
 			theme: Box::new(theme),
 			background_image,
-		})
-	})();
-	result.unwrap_or_else(LiveThemeUpdate::Failed)
+		},
+		digest: Some(current_digest),
+	})
 }
 
 pub(crate) fn trim_extended_input(invocation: &mut Invocation, limit: usize) -> bool {
@@ -1863,11 +1917,29 @@ mod tests {
 			manifest: package.manifest.clone(),
 		}
 	}
-	fn wait_for_live_theme(watcher: &LiveThemeWatcher) -> LiveThemeUpdate {
+	fn wait_for_live_theme(watcher: &LiveThemeWatcher) -> LiveThemeChanges {
 		let deadline = std::time::Instant::now() + Duration::from_secs(2);
 		loop {
-			if let Some(update) = watcher.take_update() {
-				return update;
+			let changes = watcher.take_changes();
+			if changes.update.is_some() || changes.error.is_some() {
+				return changes;
+			}
+			assert!(
+				std::time::Instant::now() < deadline,
+				"live theme watcher did not publish an update"
+			);
+			std::thread::sleep(Duration::from_millis(5));
+		}
+	}
+
+	fn wait_for_live_theme_pending(
+		watcher: &LiveThemeWatcher,
+		ready: impl Fn(&LiveThemeChanges) -> bool,
+	) {
+		let deadline = std::time::Instant::now() + Duration::from_secs(2);
+		loop {
+			if watcher.pending.lock().is_ok_and(|pending| ready(&pending)) {
+				return;
 			}
 			assert!(
 				std::time::Instant::now() < deadline,
@@ -1892,17 +1964,15 @@ mod tests {
 		fs::write(&path, serde_json::to_vec(&package).unwrap()).unwrap();
 		let watcher = LiveThemeWatcher::new(&profile.0, eframe::egui::Context::default()).unwrap();
 
-		let LiveThemeUpdate::Loaded { theme, .. } = wait_for_live_theme(&watcher) else {
+		let Some(LiveThemeUpdate::Loaded { theme, .. }) = wait_for_live_theme(&watcher).update
+		else {
 			panic!("initial live theme was not loaded");
 		};
 		assert_eq!(theme.dark.colors["accent"], "#112233");
 
 		std::thread::sleep(LIVE_THEME_POLL_INTERVAL * 2);
 		fs::write(&path, b"{}").unwrap();
-		assert!(matches!(
-			wait_for_live_theme(&watcher),
-			LiveThemeUpdate::Failed(_)
-		));
+		assert!(wait_for_live_theme(&watcher).error.is_some());
 
 		package
 			.theme
@@ -1913,15 +1983,98 @@ mod tests {
 			.insert("accent".into(), "#445566".into());
 		std::thread::sleep(LIVE_THEME_POLL_INTERVAL * 2);
 		fs::write(&path, serde_json::to_vec(&package).unwrap()).unwrap();
-		let LiveThemeUpdate::Loaded { theme, .. } = wait_for_live_theme(&watcher) else {
+		let Some(LiveThemeUpdate::Loaded { theme, .. }) = wait_for_live_theme(&watcher).update
+		else {
 			panic!("replacement live theme was not loaded");
 		};
 		assert_eq!(theme.dark.colors["accent"], "#445566");
 
 		fs::remove_file(path).unwrap();
 		assert!(matches!(
-			wait_for_live_theme(&watcher),
-			LiveThemeUpdate::Cleared
+			wait_for_live_theme(&watcher).update,
+			Some(LiveThemeUpdate::Cleared)
+		));
+	}
+
+	#[test]
+	fn live_theme_watcher_keeps_pending_state_when_a_later_load_fails() {
+		let profile = Profile::new();
+		let path = profile.0.join(LIVE_THEME_FILE);
+		fs::write(&path, serde_json::to_vec(&theme("live-theme")).unwrap()).unwrap();
+		let watcher = LiveThemeWatcher::new(&profile.0, eframe::egui::Context::default()).unwrap();
+		wait_for_live_theme_pending(&watcher, |pending| pending.update.is_some());
+
+		std::thread::sleep(LIVE_THEME_POLL_INTERVAL * 2);
+		fs::write(&path, b"{}").unwrap();
+		wait_for_live_theme_pending(&watcher, |pending| pending.error.is_some());
+		let changes = watcher.take_changes();
+		assert!(matches!(
+			changes.update,
+			Some(LiveThemeUpdate::Loaded { .. })
+		));
+		assert!(changes.error.is_some());
+
+		std::thread::sleep(LIVE_THEME_POLL_INTERVAL * 2);
+		fs::remove_file(&path).unwrap();
+		wait_for_live_theme_pending(&watcher, |pending| {
+			matches!(pending.update.as_ref(), Some(LiveThemeUpdate::Cleared))
+		});
+		std::thread::sleep(LIVE_THEME_POLL_INTERVAL * 2);
+		fs::write(&path, b"{}").unwrap();
+		wait_for_live_theme_pending(&watcher, |pending| pending.error.is_some());
+		let changes = watcher.take_changes();
+		assert!(matches!(changes.update, Some(LiveThemeUpdate::Cleared)));
+		assert!(changes.error.is_some());
+	}
+
+	#[test]
+	fn live_theme_watcher_ignores_neighboring_file_changes() {
+		let profile = Profile::new();
+		let path = profile.0.join(LIVE_THEME_FILE);
+		fs::write(&path, serde_json::to_vec(&theme("live-theme")).unwrap()).unwrap();
+		let watcher = LiveThemeWatcher::new(&profile.0, eframe::egui::Context::default()).unwrap();
+		let _ = wait_for_live_theme(&watcher);
+		let before = live_theme_stamp(&path);
+
+		let mut after = before.clone();
+		for index in 0..10 {
+			fs::write(profile.0.join(format!("neighbor-{index}")), b"changed").unwrap();
+			after = live_theme_stamp(&path);
+			if after != before {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(5));
+		}
+		assert_ne!(before, after);
+		std::thread::sleep(LIVE_THEME_POLL_INTERVAL * 3);
+		let changes = watcher.take_changes();
+		assert!(changes.update.is_none());
+		assert!(changes.error.is_none());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn live_theme_watcher_retries_a_read_failure_without_a_metadata_change() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let profile = Profile::new();
+		let path = profile.0.join(LIVE_THEME_FILE);
+		fs::write(&path, serde_json::to_vec(&theme("live-theme")).unwrap()).unwrap();
+		let readable = fs::metadata(&path).unwrap().permissions();
+		fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+		if File::open(&path).is_ok() {
+			fs::set_permissions(&path, readable).unwrap();
+			return;
+		}
+		let stamp = live_theme_stamp(&path);
+		let watcher = LiveThemeWatcher::new(&profile.0, eframe::egui::Context::default()).unwrap();
+		assert!(wait_for_live_theme(&watcher).error.is_some());
+
+		fs::set_permissions(&path, readable).unwrap();
+		assert_eq!(live_theme_stamp(&path), stamp);
+		assert!(matches!(
+			wait_for_live_theme(&watcher).update,
+			Some(LiveThemeUpdate::Loaded { .. })
 		));
 	}
 	fn message_event_job() -> Job {

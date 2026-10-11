@@ -435,15 +435,17 @@ application data directory. Typical packaged-build locations are
 same path below `serein-development`; an absolute `SEREIN_DATA_DIR` replaces the application data
 root. Writers should create a complete sibling file and atomically replace the live file.
 
-One watcher thread checks local file metadata twice per second. It performs no network request and
-reads package bytes only when the file changes. Parsing retains the ordinary 16 MiB package limit,
-theme validation, and embedded-image limits. The UI retains one last valid live theme and decoded
+One watcher thread checks local file metadata twice per second. It performs no network request.
+When the live file or its directory changes, a content digest prevents unchanged themes from being
+parsed, decoded, or applied again. Parsing retains the ordinary 16 MiB package limit, theme
+validation, and embedded-image limits. The UI retains one last valid live theme and decoded
 background. During replacement, the pending update can briefly retain one additional decoded
 background; each is bounded to 4,096 pixels per edge, 4,000,000 pixels, and 32 MiB decoder
-allocation. Invalid or incomplete writes preserve the previous live theme. The latest watcher
-result replaces any unread result, so updates cannot form an unbounded queue. Removing the file
-releases the override and restores the installed selection. The live package is not copied into the
-installed-theme store and does not change the catalog or active-theme record.
+allocation. Invalid or incomplete writes preserve the previous live theme and are retried without
+repeating the same error. One pending theme change and one pending error are retained, so updates
+cannot form an unbounded queue. Removing the file releases the override and restores the installed
+selection. The live package is not copied into the installed-theme store and does not change the
+catalog or active-theme record.
 
 ## Last-viewed server channels (September 14, 2026)
 
