@@ -425,6 +425,26 @@ result slot remain. These are allocation ceilings, not measured process RSS.
 Local image picking and export are explicit host actions; plugins gain no file or
 network access. There is no image cache directory, telemetry, or automatic upload.
 
+### Live theme override
+
+External theme tools may own one `extensions/live-theme.serein-extension` file beneath the
+application data directory. Typical packaged-build locations are
+`~/.local/share/serein/extensions/live-theme.serein-extension` on Linux,
+`~/Library/Application Support/serein/extensions/live-theme.serein-extension` on macOS, and
+`%LOCALAPPDATA%/serein/extensions/live-theme.serein-extension` on Windows. Source builds use the
+same path below `serein-development`; an absolute `SEREIN_DATA_DIR` replaces the application data
+root. Writers should create a complete sibling file and atomically replace the live file.
+
+One watcher thread checks local file metadata twice per second. It performs no network request and
+reads package bytes only when the file changes. Parsing retains the ordinary 16 MiB package limit,
+theme validation, and embedded-image limits. The UI retains one last valid live theme and decoded
+background. During replacement, the pending update can briefly retain one additional decoded
+background; each is bounded to 4,096 pixels per edge, 4,000,000 pixels, and 32 MiB decoder
+allocation. Invalid or incomplete writes preserve the previous live theme. The latest watcher
+result replaces any unread result, so updates cannot form an unbounded queue. Removing the file
+releases the override and restores the installed selection. The live package is not copied into the
+installed-theme store and does not change the catalog or active-theme record.
+
 ## Last-viewed server channels (September 14, 2026)
 
 Server navigation remembers at most 1,024 guild/channel ID pairs in session RAM

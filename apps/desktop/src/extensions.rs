@@ -6,11 +6,12 @@ use std::{
 	net::{IpAddr, Ipv4Addr},
 	path::{Path, PathBuf},
 	sync::{
-		Arc,
+		Arc, Mutex,
 		atomic::{AtomicU64, Ordering},
 		mpsc::{self, Receiver},
 	},
-	time::Duration,
+	thread::JoinHandle,
+	time::{Duration, SystemTime},
 };
 
 use extensions::{
@@ -30,6 +31,127 @@ const MAX_STORAGE: usize = 1024 * 1024;
 const MAX_PER_SCOPE: usize = 8;
 const MAX_ACCOUNTS: usize = 8;
 const MAX_QUEUE: usize = 4;
+const LIVE_THEME_FILE: &str = "live-theme.serein-extension";
+#[cfg(not(test))]
+const LIVE_THEME_POLL_INTERVAL: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const LIVE_THEME_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LiveThemeStamp {
+	Missing,
+	Unreadable,
+	Present {
+		bytes: u64,
+		modified: Option<SystemTime>,
+		directory_modified: Option<SystemTime>,
+	},
+}
+
+fn live_theme_stamp(path: &Path) -> LiveThemeStamp {
+	match fs::metadata(path) {
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => LiveThemeStamp::Missing,
+		Err(_) => LiveThemeStamp::Unreadable,
+		Ok(metadata) if metadata.is_file() => LiveThemeStamp::Present {
+			bytes: metadata.len(),
+			modified: metadata.modified().ok(),
+			directory_modified: path.parent().and_then(|parent| {
+				fs::metadata(parent)
+					.ok()
+					.and_then(|metadata| metadata.modified().ok())
+			}),
+		},
+		Ok(_) => LiveThemeStamp::Unreadable,
+	}
+}
+
+pub(super) enum LiveThemeUpdate {
+	Loaded {
+		theme: Box<Theme>,
+		background_image: Option<Arc<eframe::egui::ColorImage>>,
+	},
+	Cleared,
+	Failed(String),
+}
+
+/// Watches the user-managed live theme package without exposing Serein's installed-package store.
+pub(super) struct LiveThemeWatcher {
+	latest: Arc<Mutex<Option<LiveThemeUpdate>>>,
+	stop: Option<mpsc::Sender<()>>,
+	thread: Option<JoinHandle<()>>,
+}
+
+impl LiveThemeWatcher {
+	pub fn new(root: &Path, context: eframe::egui::Context) -> Result<Self, String> {
+		let path = root.join(LIVE_THEME_FILE);
+		let latest = Arc::new(Mutex::new(None));
+		let updates = latest.clone();
+		let (stop, stopped) = mpsc::channel();
+		let thread = std::thread::Builder::new()
+			.name("serein-live-theme".into())
+			.spawn(move || {
+				let mut observed = None;
+				loop {
+					let stamp = live_theme_stamp(&path);
+					if observed.as_ref() != Some(&stamp) {
+						observed = Some(stamp.clone());
+						let update = match stamp {
+							LiveThemeStamp::Missing => LiveThemeUpdate::Cleared,
+							LiveThemeStamp::Unreadable => {
+								LiveThemeUpdate::Failed("Live theme package cannot be read".into())
+							}
+							LiveThemeStamp::Present { .. } => load_live_theme(&path),
+						};
+						if let Ok(mut latest) = updates.lock() {
+							*latest = Some(update);
+						}
+						context.request_repaint();
+					}
+					match stopped.recv_timeout(LIVE_THEME_POLL_INTERVAL) {
+						Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+						Err(mpsc::RecvTimeoutError::Timeout) => {}
+					}
+				}
+			})
+			.map_err(|_| "Cannot start live theme watcher".to_owned())?;
+		Ok(Self {
+			latest,
+			stop: Some(stop),
+			thread: Some(thread),
+		})
+	}
+
+	pub fn take_update(&self) -> Option<LiveThemeUpdate> {
+		self.latest.lock().ok()?.take()
+	}
+}
+
+impl Drop for LiveThemeWatcher {
+	fn drop(&mut self) {
+		self.stop.take();
+		if let Some(thread) = self.thread.take() {
+			let _ = thread.join();
+		}
+	}
+}
+
+fn load_live_theme(path: &Path) -> LiveThemeUpdate {
+	let result = (|| {
+		let bytes = read_bounded(path, MAX_PACKAGE)?;
+		let package = extensions::parse_package(&bytes)
+			.map_err(|_| "Live theme package is invalid".to_owned())?;
+		if package.manifest.kind != ExtensionKind::Theme {
+			return Err("Live theme file must contain a theme package".into());
+		}
+		let background_image = package_background(&package)?;
+		let theme = package.theme.ok_or("Live theme package has no theme")?;
+		Ok(LiveThemeUpdate::Loaded {
+			theme: Box::new(theme),
+			background_image,
+		})
+	})();
+	result.unwrap_or_else(LiveThemeUpdate::Failed)
+}
 
 pub(crate) fn trim_extended_input(invocation: &mut Invocation, limit: usize) -> bool {
 	for field in 0..=3 {
@@ -1740,6 +1862,67 @@ mod tests {
 			sha256: digest(&bytes),
 			manifest: package.manifest.clone(),
 		}
+	}
+	fn wait_for_live_theme(watcher: &LiveThemeWatcher) -> LiveThemeUpdate {
+		let deadline = std::time::Instant::now() + Duration::from_secs(2);
+		loop {
+			if let Some(update) = watcher.take_update() {
+				return update;
+			}
+			assert!(
+				std::time::Instant::now() < deadline,
+				"live theme watcher did not publish an update"
+			);
+			std::thread::sleep(Duration::from_millis(5));
+		}
+	}
+
+	#[test]
+	fn live_theme_watcher_applies_valid_replacements_and_clears_on_remove() {
+		let profile = Profile::new();
+		let path = profile.0.join(LIVE_THEME_FILE);
+		let mut package = theme("live-theme");
+		package
+			.theme
+			.as_mut()
+			.unwrap()
+			.dark
+			.colors
+			.insert("accent".into(), "#112233".into());
+		fs::write(&path, serde_json::to_vec(&package).unwrap()).unwrap();
+		let watcher = LiveThemeWatcher::new(&profile.0, eframe::egui::Context::default()).unwrap();
+
+		let LiveThemeUpdate::Loaded { theme, .. } = wait_for_live_theme(&watcher) else {
+			panic!("initial live theme was not loaded");
+		};
+		assert_eq!(theme.dark.colors["accent"], "#112233");
+
+		std::thread::sleep(LIVE_THEME_POLL_INTERVAL * 2);
+		fs::write(&path, b"{}").unwrap();
+		assert!(matches!(
+			wait_for_live_theme(&watcher),
+			LiveThemeUpdate::Failed(_)
+		));
+
+		package
+			.theme
+			.as_mut()
+			.unwrap()
+			.dark
+			.colors
+			.insert("accent".into(), "#445566".into());
+		std::thread::sleep(LIVE_THEME_POLL_INTERVAL * 2);
+		fs::write(&path, serde_json::to_vec(&package).unwrap()).unwrap();
+		let LiveThemeUpdate::Loaded { theme, .. } = wait_for_live_theme(&watcher) else {
+			panic!("replacement live theme was not loaded");
+		};
+		assert_eq!(theme.dark.colors["accent"], "#445566");
+
+		fs::remove_file(path).unwrap();
+		assert!(matches!(
+			wait_for_live_theme(&watcher),
+			LiveThemeUpdate::Cleared
+		));
 	}
 	fn message_event_job() -> Job {
 		Job::Invoke {
