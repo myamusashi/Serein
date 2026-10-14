@@ -6,8 +6,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, RingBuffer};
 
 struct Playback {
-	frames: Consumer<[f32; 2]>,
-	current: Option<[f32; 2]>,
+	/// Frames to play, each with its source position, so speed changes keep the clock right.
+	frames: Consumer<super::stretch::Frame>,
+	current: Option<super::stretch::Frame>,
 	phase: f64,
 	position: f64,
 	rate: u32,
@@ -69,14 +70,14 @@ impl Playback {
 					}
 				}
 			}
-			let Some(left) = self.current else {
+			let Some((left, from)) = self.current else {
 				self.finished.store(eof, Ordering::Release);
 				gate.buffering.store(!eof, Ordering::Release);
 				return;
 			};
-			let right = match self.frames.peek() {
+			let (right, to) = match self.frames.peek() {
 				Ok(frame) => *frame,
-				Err(_) if eof => left,
+				Err(_) if eof => (left, from + 1.0),
 				Err(_) => {
 					gate.buffering.store(true, Ordering::Release);
 					self.rebuffering = true;
@@ -94,7 +95,7 @@ impl Playback {
 			}
 			let step = f64::from(self.rate) / f64::from(output_rate);
 			self.phase += step;
-			self.position += step;
+			self.position = from + (to - from) * self.phase;
 			gate.position_frames
 				.store(self.position as u64, Ordering::Release);
 			gate.buffering.store(false, Ordering::Release);
@@ -197,6 +198,9 @@ pub(super) fn play(
 			}
 			Ok(())
 		};
+		let speed = f64::from(f32::from_bits(gate.speed.load(Ordering::Acquire)));
+		let mut stretch: Option<super::stretch::Stretch> = None;
+		let mut staged: Vec<super::stretch::Frame> = Vec::new();
 		let wait = || {
 			runtime.block_on(async {
 			tokio::select! { _ = wake.notified() => {}, _ = tokio::time::sleep(Duration::from_millis(20)) => {} }
@@ -217,6 +221,7 @@ pub(super) fn play(
 						let packet_frames = (samples.len() / channels) as u64;
 						let skip =
 							target_frame.saturating_sub(total_frames).min(packet_frames) as usize;
+						let first = total_frames + skip as u64;
 						total_frames += packet_frames;
 						if skip == packet_frames as usize {
 							return Ok(());
@@ -237,7 +242,29 @@ pub(super) fn play(
 							producer = Some(sender);
 						}
 						let producer = producer.as_mut().expect("initialized above");
-						for frame in samples[skip * channels..].chunks_exact(channels) {
+						if speed != 1.0 && stretch.is_none() {
+							stretch =
+								Some(super::stretch::Stretch::new(speed, rate, first as usize));
+						}
+						let clean = |sample: f32| {
+							if sample.is_finite() {
+								sample.clamp(-1.0, 1.0)
+							} else {
+								0.0
+							}
+						};
+						staged.clear();
+						for (index, frame) in samples[skip * channels..]
+							.chunks_exact(channels)
+							.enumerate()
+						{
+							let frame = [clean(frame[0]), clean(frame[channels - 1])];
+							match &mut stretch {
+								Some(stretch) => stretch.push(frame, &mut staged),
+								None => staged.push((frame, (first + index as u64) as f64)),
+							}
+						}
+						for frame in &staged {
 							// A full ring is past the pre-roll; open output before waiting on it.
 							if producer.slots() == 0 && stream.is_none() {
 								open(&mut pending, &mut stream, duration)?;
@@ -254,16 +281,7 @@ pub(super) fn play(
 							if !current() {
 								return Err("Cancelled");
 							}
-							let clean = |sample: f32| {
-								if sample.is_finite() {
-									sample.clamp(-1.0, 1.0)
-								} else {
-									0.0
-								}
-							};
-							producer
-								.push([clean(frame[0]), clean(frame[channels - 1])])
-								.map_err(|_| INVALID)?;
+							producer.push(*frame).map_err(|_| INVALID)?;
 						}
 						let queued = rate as usize - producer.slots();
 						if stream.is_none() && queued >= (rate / PREROLL_DIVISOR) as usize {
@@ -273,6 +291,15 @@ pub(super) fn play(
 					},
 				)
 			});
+		// The stretcher holds the last grain's fade-out until the source ends.
+		let result = result.and_then(|()| match (&mut stretch, producer.as_mut()) {
+			(Some(stretch), Some(producer)) => {
+				staged.clear();
+				stretch.finish(&mut staged);
+				feed(producer, &staged, gate, &current, &wait)
+			}
+			_ => Ok(()),
+		});
 		if result.is_ok() {
 			eof.store(true, Ordering::Release);
 			// A clip shorter than the pre-roll still plays.
@@ -307,6 +334,32 @@ pub(super) fn play(
 	}
 }
 
+/// Queues frames for the output callback, waiting while paused or while the second ahead is full.
+fn feed(
+	producer: &mut rtrb::Producer<super::stretch::Frame>,
+	frames: &[super::stretch::Frame],
+	gate: &Gate,
+	current: &impl Fn() -> bool,
+	wait: &impl Fn(),
+) -> Result<(), &'static str> {
+	for frame in frames {
+		while gate.paused.load(Ordering::Acquire) || producer.slots() == 0 {
+			if !current() {
+				return Err("Cancelled");
+			}
+			if gate.failed.load(Ordering::Acquire) {
+				return Err("Audio output disconnected");
+			}
+			wait();
+		}
+		if !current() {
+			return Err("Cancelled");
+		}
+		producer.push(*frame).map_err(|_| INVALID)?;
+	}
+	Ok(())
+}
+
 #[cfg(all(debug_assertions, feature = "demo"))]
 pub(super) fn debug_check() {
 	let gate = Gate::default();
@@ -327,8 +380,8 @@ pub(super) fn debug_check() {
 	playback.render(&mut output, 2, 48000, &gate, 0);
 	assert_eq!(output, [0.0; 4]);
 	assert_eq!(gate.position_frames.load(Ordering::Acquire), 0);
-	for _ in 0..8 {
-		sender.push([0.5; 2]).unwrap();
+	for index in 0..8 {
+		sender.push(([0.5; 2], f64::from(index))).unwrap();
 	}
 	assert_eq!(sender.slots(), 0);
 	gate.paused.store(true, Ordering::Release);
