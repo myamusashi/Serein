@@ -132,7 +132,8 @@ pub fn check_dimensions(width: u32, height: u32) -> Result<(), &'static str> {
 	Ok(())
 }
 
-/// Fit a source of any nonzero dimensions into the bounded inline playback surface.
+/// Fit a source of any nonzero dimensions into the bounded inline playback surface,
+/// in even pixels for 4:2:0 chroma. Larger videos are scaled down rather than refused.
 /// Native decoders scale before frames enter application queues; source resolution is
 /// limited by the installed codec/device rather than the texture budget.
 pub fn playback_dimensions(width: u32, height: u32) -> Result<(u32, u32), &'static str> {
@@ -143,10 +144,12 @@ pub fn playback_dimensions(width: u32, height: u32) -> Result<(u32, u32), &'stat
 	let scale = (f64::from(MAX_LIVE_DIMENSION) / w.max(h))
 		.min((MAX_LIVE_PIXELS as f64 / (w * h)).sqrt())
 		.min(1.0);
-	let fitted = (
-		(w * scale).floor().max(1.0) as u32,
-		(h * scale).floor().max(1.0) as u32,
-	);
+	let fitted = if scale < 1.0 {
+		let even = |value: f64| ((value * scale) as u32 & !1).max(2);
+		(even(w), even(h))
+	} else {
+		(width, height)
+	};
 	check_dimensions(fitted.0, fitted.1)?;
 	Ok(fitted)
 }
@@ -194,7 +197,7 @@ mod tests {
 		assert_eq!(playback_dimensions(4320, 7680), Ok((2160, 3840)));
 		assert_eq!(playback_dimensions(4096, 4096), Ok((2880, 2880)));
 		// Extremely wide metadata must neither overflow nor round the short side to zero.
-		assert_eq!(playback_dimensions(u32::MAX, 1), Ok((3840, 1)));
+		assert_eq!(playback_dimensions(u32::MAX, 1), Ok((3840, 2)));
 		assert_eq!(playback_dimensions(0, 1080), Err(INVALID));
 	}
 
@@ -217,6 +220,28 @@ mod tests {
 		assert!(check_dimensions(2160, 3840).is_ok());
 		assert!(check_dimensions(3841, 1).is_err());
 		assert!(check_dimensions(3840, 3840).is_err());
+		for (width, height) in [
+			(7680, 4320),
+			(2560, 1440),
+			(1080, 2400),
+			(4096, 4096),
+			(7680, 100),
+		] {
+			let (w, h) = playback_dimensions(width, height).unwrap();
+			assert!(
+				check_dimensions(w, h).is_ok(),
+				"{width}x{height} -> {w}x{h}"
+			);
+			assert!(w % 2 == 0 && h % 2 == 0);
+			let aspect = f64::from(width) / f64::from(height);
+			// Even rounding moves an edge by at most two pixels.
+			assert!(
+				(f64::from(w) / aspect - f64::from(h)).abs() <= 2.0,
+				"{w}x{h}"
+			);
+		}
+		assert_eq!(playback_dimensions(3840, 2160), Ok((3840, 2160)));
+		assert_eq!(playback_dimensions(1280, 720), Ok((1280, 720)));
 		assert!(check_dimensions(0, 1).is_err());
 		// A 2x1 frame with distinct pixels rotates into a 1x2 column.
 		let frame = [1, 1, 1, 255, 2, 2, 2, 255];

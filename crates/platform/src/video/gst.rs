@@ -699,6 +699,43 @@ mod tests {
 		(Box::new(source), dropped)
 	}
 
+	/// A synthetic larger-than-4K clip encoded by this system's GStreamer plays scaled to the
+	/// inline bound instead of being refused. Skips when no H.264 encoder is installed.
+	#[test]
+	fn larger_than_4k_videos_play_scaled_to_the_inline_bound() {
+		gst::init().unwrap();
+		let path = std::env::temp_dir().join(format!("serein-8k-{}.mp4", std::process::id()));
+		let Ok(pipeline) = gst::parse::launch(&format!(
+			"videotestsrc num-buffers=5 ! video/x-raw,width=7680,height=4320,framerate=30/1 \
+			 ! x264enc speed-preset=ultrafast ! mp4mux ! filesink location={}",
+			path.display()
+		)) else {
+			eprintln!("skipped: no H.264 encoder");
+			return;
+		};
+		pipeline.set_state(gst::State::Playing).unwrap();
+		let bus = pipeline.bus().unwrap();
+		let done = bus.timed_pop_filtered(
+			gst::ClockTime::from_seconds(60),
+			&[gst::MessageType::Eos, gst::MessageType::Error],
+		);
+		pipeline.set_state(gst::State::Null).unwrap();
+		assert!(matches!(
+			done.map(|m| m.type_()),
+			Some(gst::MessageType::Eos)
+		));
+		let clip = std::fs::read(&path).unwrap();
+		let _ = std::fs::remove_file(&path);
+		let mut decoder = Decoder::open(Box::new(std::io::Cursor::new(clip))).unwrap();
+		assert_eq!((decoder.info().width, decoder.info().height), (3840, 2160));
+		let Some(Sample::Video { picture, .. }) =
+			wait_for_sample(&mut decoder, Decoder::poll_video)
+		else {
+			panic!("a scaled frame");
+		};
+		assert_eq!((picture.width, picture.height), (3840, 2160));
+	}
+
 	#[test]
 	fn uhd_samples_copy_planes_and_oversized_samples_stay_bounded() {
 		gst::init().unwrap();
