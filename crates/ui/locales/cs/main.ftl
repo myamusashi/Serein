@@ -5015,3 +5015,4 @@ timestamp-style-full = Úplné datum a čas
 timestamp-style-relative = Relativní čas
 timestamp-style-short-date-time = Krátké datum a čas
 timestamp-style-short-date-seconds = Krátké datum a čas se sekundami
+audio-playback-speed = Rychlost přehrávání
