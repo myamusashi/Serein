@@ -12,7 +12,9 @@ const ATLAS: &[u8] = include_bytes!("../../../assets/icons/atlas.png");
 const INDEX: &str = include_str!("../../../assets/icons/index.tsv");
 const COLUMNS: usize = 8;
 const CELL: f32 = 64.0;
+/// Glyph ink inside each cell. The cell is drawn larger so the ink fills the requested rect.
 const GLYPH: f32 = 56.0;
+/// Atlas cell sizes. The GPU has no mip chain, so paint picks one close to the destination.
 const LAYER_CELLS: [u32; 4] = [16, 24, 32, 64];
 const TEXTURE_KEY: &str = "phosphor-icons";
 
@@ -395,7 +397,7 @@ fn decoded() -> egui::ColorImage {
 	egui::ColorImage::from_rgba_unmultiplied(size, &image)
 }
 
-/// Upload the atlas for `ctx` during application creation, outside the render callback.
+/// Upload the atlas sizes the rail uses during application creation, outside the render callback.
 pub fn install(ctx: &egui::Context) {
 	let _ = layer(ctx, 64);
 	let _ = layer(ctx, 32);
@@ -441,6 +443,7 @@ fn layer(ctx: &egui::Context, cell: u32) -> TextureHandle {
 pub fn paint(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
 	let size = rect.width().min(rect.height());
 	let ppp = painter.pixels_per_point();
+	// The cell's padding is outside the ink, so the quad is larger than `rect` by CELL/GLYPH.
 	let drawn = size * (CELL / GLYPH);
 	let rect = Rect::from_center_size(rect.center(), Vec2::splat(drawn)).round_to_pixels(ppp);
 	let cell = crate::resample::covering_edge(drawn * ppp, &LAYER_CELLS);
@@ -555,4 +558,58 @@ pub fn inline(ui: &mut egui::Ui, icon: Icon, size: f32, color: Color32) -> Rect 
 	let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
 	paint(ui.painter(), icon, rect, color);
 	rect
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	#[test]
+	fn atlas_covers_every_icon_once_and_paints_inside_its_rect() {
+		let image = decoded();
+		let rows = Icon::ALL.len().div_ceil(COLUMNS);
+		assert_eq!(image.size, [COLUMNS * CELL as usize, rows * CELL as usize]);
+		assert!(
+			ATLAS.len() < 256 * 1024,
+			"atlas stays a small bundled asset"
+		);
+		let mut cells: Vec<usize> = Icon::ALL.iter().map(|icon| icon.cell()).collect();
+		cells.sort_unstable();
+		cells.dedup();
+		assert_eq!(cells.len(), Icon::ALL.len(), "icons map to distinct cells");
+		assert_eq!(
+			INDEX.lines().count(),
+			Icon::ALL.len(),
+			"index has no unused cells"
+		);
+		for icon in Icon::ALL {
+			// Every cell holds visible glyph pixels.
+			let cell = icon.cell();
+			let (x0, y0) = (
+				(cell % COLUMNS) * CELL as usize,
+				(cell / COLUMNS) * CELL as usize,
+			);
+			let opaque = (0..CELL as usize)
+				.flat_map(|dy| (0..CELL as usize).map(move |dx| (dx, dy)))
+				.filter(|(dx, dy)| image[(x0 + dx, y0 + dy)].a() > 128)
+				.count();
+			assert!(opaque > 40, "{icon:?} cell is blank");
+		}
+		let ctx = egui::Context::default();
+		let output = ctx.run_ui(Default::default(), |ui| {
+			for icon in Icon::ALL {
+				let rect = Rect::from_min_size(egui::pos2(10.0, 10.0), Vec2::splat(24.0));
+				paint(ui.painter(), icon, rect, Color32::WHITE);
+				assert!(button(ui, icon, 32.0, "icon").rect.width() == 32.0);
+			}
+		});
+		assert!(
+			output.textures_delta.set.len() <= 1 + LAYER_CELLS.len(),
+			"fonts plus one atlas upload per drawn cell size"
+		);
+		for shape in &output.shapes {
+			let bounds = shape.shape.visual_bounding_rect();
+			assert!(bounds.is_negative() || bounds.min.x >= -1.0, "{:?}", bounds);
+		}
+		output.drop_without_applying_deltas();
+	}
 }
