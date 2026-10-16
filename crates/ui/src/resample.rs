@@ -1,14 +1,10 @@
 //! egui-wgpu keeps a single mip level and minifies with a 2×2 sample.
 //! A texture much larger than the pixels it covers skips texels and aliases.
-//! Callers hand the sampler a rung just above the destination instead.
 
 use egui::ColorImage;
 
-/// Largest minify the GPU filter can do before fine detail aliases.
 const MAX_GPU_MINIFY: f32 = 1.45;
 const RUNGS: [u32; 11] = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512];
-
-/// Smallest rung that still covers `physical` pixels, or 512 past the table.
 fn sample_edge(physical: f32) -> u32 {
 	RUNGS
 		.into_iter()
@@ -16,7 +12,6 @@ fn sample_edge(physical: f32) -> u32 {
 		.unwrap_or(RUNGS[RUNGS.len() - 1])
 }
 
-/// Edge to decode before a GPU draw, when `source` would alias onto `physical` pixels.
 pub(crate) fn fitted_edge(source: u32, physical: f32) -> Option<u32> {
 	if source <= 1 || !physical.is_finite() || physical <= 0.0 {
 		return None;
@@ -28,8 +23,6 @@ pub(crate) fn fitted_edge(source: u32, physical: f32) -> Option<u32> {
 	(edge < source).then_some(edge)
 }
 
-/// Largest listed edge the GPU can minify onto `physical` pixels.
-/// A smaller edge (mild magnification) stays smoother than skipping texels.
 pub(crate) fn covering_edge(physical: f32, edges: &[u32]) -> u32 {
 	let Some(&smallest) = edges.iter().min() else {
 		return 1;
@@ -46,7 +39,6 @@ pub(crate) fn covering_edge(physical: f32, edges: &[u32]) -> u32 {
 		.unwrap_or(smallest)
 }
 
-/// Premultiplied resize. `edge` is the longest side of the result.
 pub(crate) fn downscale(image: &ColorImage, edge: u32) -> ColorImage {
 	let width = image.size[0] as u32;
 	let height = image.size[1] as u32;
@@ -62,8 +54,6 @@ pub(crate) fn downscale(image: &ColorImage, edge: u32) -> ColorImage {
 	downscale_filter(image, edge, filter)
 }
 
-/// Same as [`downscale`], with the kernel chosen by the caller.
-/// Line icons use [`FilterType::Triangle`] so a negative lobe cannot halo the alpha.
 pub(crate) fn downscale_filter(
 	image: &ColorImage,
 	edge: u32,

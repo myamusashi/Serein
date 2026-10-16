@@ -12,9 +12,7 @@ const ATLAS: &[u8] = include_bytes!("../../../assets/icons/atlas.png");
 const INDEX: &str = include_str!("../../../assets/icons/index.tsv");
 const COLUMNS: usize = 8;
 const CELL: f32 = 64.0;
-/// Glyph ink inside each cell. The cell is drawn larger so the ink fills the requested rect.
 const GLYPH: f32 = 56.0;
-/// Atlas cell sizes. The GPU has no mip chain, so paint picks one close to the destination.
 const LAYER_CELLS: [u32; 4] = [16, 24, 32, 64];
 const TEXTURE_KEY: &str = "phosphor-icons";
 
@@ -397,7 +395,7 @@ fn decoded() -> egui::ColorImage {
 	egui::ColorImage::from_rgba_unmultiplied(size, &image)
 }
 
-/// Upload the atlas sizes the rail uses during application creation, outside the render callback.
+/// Upload the atlas for `ctx` during application creation, outside the render callback.
 pub fn install(ctx: &egui::Context) {
 	let _ = layer(ctx, 64);
 	let _ = layer(ctx, 32);
@@ -443,7 +441,6 @@ fn layer(ctx: &egui::Context, cell: u32) -> TextureHandle {
 pub fn paint(painter: &egui::Painter, icon: Icon, rect: Rect, color: Color32) {
 	let size = rect.width().min(rect.height());
 	let ppp = painter.pixels_per_point();
-	// The cell's padding is outside the ink, so the quad is larger than `rect` by CELL/GLYPH.
 	let drawn = size * (CELL / GLYPH);
 	let rect = Rect::from_center_size(rect.center(), Vec2::splat(drawn)).round_to_pixels(ppp);
 	let cell = crate::resample::covering_edge(drawn * ppp, &LAYER_CELLS);

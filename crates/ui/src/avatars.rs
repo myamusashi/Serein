@@ -39,7 +39,6 @@ const EMOJI_TEXTURE_BYTES: usize = 16 * 1024 * 1024;
 const TEXTURES: usize = 512;
 const TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 const IDLE_TEXTURES: Duration = Duration::from_secs(60);
-/// Decoded stills small enough to filter again for a rail or folder tile.
 const SOURCE_EDGE: usize = 128;
 const SOURCE_BYTES: usize = 48 * 1024 * 1024;
 const FIT_BYTES: usize = 16 * 1024 * 1024;
@@ -87,10 +86,8 @@ pub(crate) struct Avatars {
 	effect_reloaded: HashSet<String>,
 	textures: HashMap<String, (Instant, TextureHandle)>,
 	emoji_textures: HashMap<String, (Instant, TextureHandle)>,
-	/// Premultiplied stills kept so a later paint can filter them to the destination.
 	sources: HashMap<String, Arc<ColorImage>>,
 	source_bytes: usize,
-	/// GPU copies already filtered to a display rung. `frame` is the animation index, if any.
 	fits: HashMap<String, Vec<Fit>>,
 	fit_bytes: usize,
 	emoji_bytes: usize,
@@ -466,7 +463,6 @@ impl Avatars {
 		}
 		self.sources.get(key).map(Arc::clone)
 	}
-	/// Texture whose longest side is close to the physical size of `rect`.
 	fn coverage(
 		&mut self,
 		ctx: &egui::Context,
