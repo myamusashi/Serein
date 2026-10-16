@@ -5,6 +5,7 @@ use egui::ColorImage;
 
 const MAX_GPU_MINIFY: f32 = 1.45;
 const RUNGS: [u32; 11] = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512];
+
 fn sample_edge(physical: f32) -> u32 {
 	RUNGS
 		.into_iter()
