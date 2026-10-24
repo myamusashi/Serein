@@ -574,6 +574,23 @@ mod tests {
 	}
 
 	#[test]
+	fn collapsed_message_requests_restore_and_track_user_changes() {
+		let mut settings = Settings::default();
+		settings.loaded = true;
+		settings.current.message_requests_collapsed = true;
+		let mut ui = ui::MessagingUi::default();
+		settings.apply(&mut ui);
+		assert!(ui.message_requests_collapsed);
+		settings.observe(&ui);
+		assert!(!settings.state.dirty);
+
+		ui.message_requests_collapsed = false;
+		settings.observe(&ui);
+		assert!(!settings.current.message_requests_collapsed);
+		assert!(settings.state.dirty);
+	}
+
+	#[test]
 	fn legacy_preferences_without_voice_settings_keep_suppression_disabled() {
 		let current: AppPreferences = serde_json::from_str("{}").unwrap();
 		assert!(!current.voice_noise_suppression);
