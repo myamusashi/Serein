@@ -547,4 +547,3 @@ pub fn inline(ui: &mut egui::Ui, icon: Icon, size: f32, color: Color32) -> Rect 
 	paint(ui.painter(), icon, rect, color);
 	rect
 }
-
