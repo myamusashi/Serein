@@ -472,18 +472,24 @@ fn main() -> eframe::Result {
 	} else {
 		local_store::LocalStore::open_default().and_then(|store| store.app_preferences())
 	};
-	let (gpu_preference, transparency_available, hide_window_decorations, window_geometry) =
-		preferences
-			.as_ref()
-			.map(|value| {
-				(
-					value.gpu_preference,
-					value.transparency_blur,
-					value.hide_window_decorations,
-					value.window_geometry,
-				)
-			})
-			.unwrap_or_default();
+	let (
+		gpu_preference,
+		hardware_acceleration,
+		transparency_available,
+		hide_window_decorations,
+		window_geometry,
+	) = preferences
+		.as_ref()
+		.map(|value| {
+			(
+				value.gpu_preference,
+				value.hardware_acceleration,
+				value.transparency_blur,
+				value.hide_window_decorations,
+				value.window_geometry,
+			)
+		})
+		.unwrap_or_default();
 	#[cfg(feature = "demo")]
 	let transparency_available =
 		transparency_available || demo && std::env::args().any(|arg| arg == "--demo-transparency");
@@ -556,7 +562,12 @@ fn main() -> eframe::Result {
 					native_adapter_selector: Some(std::sync::Arc::new(
 						move |adapters: &[eframe::wgpu::Adapter],
 						      surface: Option<&eframe::wgpu::Surface<'_>>| {
-							gpu::select(gpu_preference, adapters, surface)
+							gpu::select(
+								gpu_preference,
+								hardware_acceleration.app,
+								adapters,
+								surface,
+							)
 						},
 					)),
 					..gpu::setup()
@@ -579,6 +590,10 @@ fn main() -> eframe::Result {
 		Box::new(move |cc| {
 			let mut desktop =
 				Desktop::new(cc, demo, frame_sample, transparency_available, preferences)?;
+			desktop.messaging.hardware_app_fallback = !hardware_acceleration.app
+				&& cc.wgpu_render_state.as_ref().is_some_and(|render| {
+					render.adapter.get_info().device_type != eframe::wgpu::DeviceType::Cpu
+				});
 			let wake = cc.egui_ctx.clone();
 			instance.listen(
 				desktop.window.clone(),

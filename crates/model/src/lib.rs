@@ -18,7 +18,7 @@ pub use keybinds::{KeyChord, KeybindAction, Keybinds};
 pub mod forum;
 pub mod gifs;
 mod graphics;
-pub use graphics::GpuPreference;
+pub use graphics::{GpuPreference, HardwareAcceleration};
 mod time_format;
 pub use time_format::TimeFormat;
 pub mod guild_folders;
