@@ -221,6 +221,10 @@ fn select(
 	}
 	if !hardware_acceleration && info.device_type != wgpu::DeviceType::Cpu {
 		eprintln!("[Serein] Software rendering is unavailable; using a compatible GPU");
+	} else if hardware_acceleration && software(&info) {
+		eprintln!(
+			"[Serein] GPU adapter is a software rasterizer; set WGPU_BACKEND=gl to try the GPU's OpenGL driver"
+		);
 	}
 	Ok((*adapter).clone())
 }
@@ -229,10 +233,16 @@ fn acceleration_rank(
 	info: &wgpu::AdapterInfo,
 	prefer_integrated: bool,
 	enabled: bool,
-) -> (u8, u8, u8) {
-	let (device, backend) = rank(info, prefer_integrated);
+) -> (u8, u8, u8, u8) {
+	let (software_rasterizer, device, backend) = rank(info, prefer_integrated);
 	(
-		u8::from(!enabled && info.device_type != wgpu::DeviceType::Cpu),
+		// With acceleration off, a CPU adapter is the requested software renderer; with it on,
+		// a software rasterizer is the last resort however it presents.
+		if enabled {
+			software_rasterizer
+		} else {
+			u8::from(info.device_type != wgpu::DeviceType::Cpu)
+		},
 		device,
 		backend,
 	)
