@@ -55,7 +55,6 @@ Automatic retains the Windows DirectX 12 / OpenGL policy and other platform defa
 launch. The current adapter/backend remains visible in settings, and bug reports include
 the requested API and whether an environment override is active. Driver initialization
 crashes cannot be caught by this fallback; Windows Vulkan remains an explicit opt-in.
-
 Adapter selection prefers a real GPU over a software rasterizer whichever backend presents it.
 Windows offers WARP ("Microsoft Basic Render Driver") as its Direct3D adapter on hardware that
 predates DX12, and drawing the client on the CPU that way freezes a machine whose GPU still
