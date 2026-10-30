@@ -1076,6 +1076,7 @@ impl Calls {
 			}
 			"VOICE_SERVER_UPDATE" => {
 				let mut server: VoiceServerDto = decode(data).map_err(|_| Failure::Protocol)?;
+
 				let token = Zeroizing::new(std::mem::take(&mut server.token));
 				let Some((channel, request)) = self.active else {
 					return Ok(());
@@ -1084,6 +1085,7 @@ impl Calls {
 					|| self.allowed.get(&channel) != Some(&self.active_guild)
 					|| (self.active_guild.is_none() && server.channel_id != Some(channel))
 				{
+
 					return Ok(());
 				}
 				if server.endpoint.as_ref().is_some_and(|s| s.len() > 512) {

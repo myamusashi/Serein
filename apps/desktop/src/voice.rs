@@ -1046,6 +1046,7 @@ impl Voice {
 				Duration::from_secs(30).saturating_sub(pending.started.elapsed()),
 			);
 		}
+
 		if self.retiring.is_none()
 			&& self.pending.as_ref().is_some_and(|p| {
 				!p.failed_candidate
@@ -1053,6 +1054,7 @@ impl Voice {
 					&& p.negotiation_revision.is_some()
 					&& p.server.is_some()
 			}) {
+
 			let pending = self.pending.take().expect("pending negotiation");
 			let listen_only = permission_mutes_microphone(
 				state,
@@ -1334,6 +1336,7 @@ impl Voice {
 			note(Level::Error, "removed by the service", &[]);
 			return self.give_up_rejoin(state, discord_voice::DISCONNECTED_BY_DISCORD, true);
 		}
+
 		if failure.is_some()
 			&& self
 				.live
@@ -1875,6 +1878,7 @@ impl Voice {
 				media_identity,
 			)
 			.await;
+
 			if let Err(error) = result {
 				let _ = transport_failure.set(error);
 			}

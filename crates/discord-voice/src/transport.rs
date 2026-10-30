@@ -103,6 +103,7 @@ fn public_ip(ip: IpAddr) -> bool {
 	}
 }
 
+
 async fn send(ws: &mut Socket, message: Message) -> Result<(), &'static str> {
 	timeout(Duration::from_secs(5), ws.send(message))
 		.await
@@ -529,6 +530,7 @@ async fn run_inner(
 	let mut speakers_at = Instant::now();
 	loop {
 		if let Some(reason) = reconnect.take() {
+
 			if encryption.is_none() || resume_attempts >= 2 {
 				return Err(reason);
 			}
@@ -1546,7 +1548,7 @@ async fn run_stream_inner(
 			_=tick.tick()=>{
 				let now=Instant::now();
 				history.expire(now);
-				if encryption.is_none() && deadline.is_some_and(|at| now>=at) {return Err(negotiation_timeout(heartbeat_ms.is_some(),udp.is_some(),encryption.is_some(),&dave,false));}
+				if deadline.is_some_and(|at| now>=at) {return Err(negotiation_timeout(heartbeat_ms.is_some(),udp.is_some(),encryption.is_some(),&dave,false));}
 				if discovering {
 					if now>=discovery_deadline {return Err("Discord stream UDP discovery timed out");}
 					if now>=next_discovery_probe && let Some(socket)=&udp {
@@ -1575,9 +1577,9 @@ async fn run_stream_inner(
 					emit(if waiting {Status::WaitingForPeer} else {Status::Securing}).map_err(|_|"Stream interface closed")?;
 					waiting_announced=waiting;
 				}
-				let secure=!waiting && encryption.is_some() && !discovering;
+				let secure=dave.ready&&dave.session.is_ready()&&!dave.transitioning()&&encryption.is_some()&&!discovering;
 				// A rekey can begin after initial readiness cleared the allocation deadline.
-				if encryption.is_none() && !waiting {deadline.get_or_insert(now+Duration::from_secs(30));}
+				if !secure && !waiting {deadline.get_or_insert(now+Duration::from_secs(30));}
 				if secure && let Some(video)=&video && let Some(target)=rate.tick(now) {
 					video.bitrate.store(target,Ordering::Release);
 				}
@@ -1792,10 +1794,11 @@ async fn run_stream_inner(
 					if audio.is_none() {continue;}
 					let Some(user)=mixer.user(rtp.ssrc) else {continue;};
 					let start=metrics.start();
-					let opus=if dave.ready && dave.contains(user) {
+					let is_dave = rtp.payload.len() >= 2 && rtp.payload.ends_with(&crate::crypto::MARKER_BYTES);
+					let opus=if is_dave {
 						match dave.session.decrypt(user,davey::MediaType::AUDIO,&rtp.payload) {
 							Ok(decrypted) => decrypted,
-							Err(_) => rtp.payload.to_vec(),
+							Err(_) => continue,
 						}
 					} else {
 						rtp.payload.to_vec()
