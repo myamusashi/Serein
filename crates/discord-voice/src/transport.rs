@@ -590,7 +590,7 @@ async fn run_inner(
 						   // silent interval marks the socket as zombied, and Discord expects a resume.
 						   if awaiting_ack.is_some() {
 							   missed_acks+=1;
-							   if missed_acks>=2 {reconnect=Some("Discord voice heartbeat was not acknowledged; rejoin the call");continue;}
+							   if missed_acks>=3 {reconnect=Some("Discord voice heartbeat was not acknowledged; rejoin the call");continue;}
 						   }
 						   heartbeat_nonce=heartbeat_nonce.wrapping_add(1);
 						   json_send(&mut ws,json!({"op":3,"d":{"t":heartbeat_nonce,"seq_ack":seq_ack}})).await?;
@@ -755,12 +755,16 @@ async fn run_inner(
 								   8=>{
 									   let interval=data["heartbeat_interval"].as_f64().filter(|v|v.is_finite() && *v>=100.0 && *v<=120_000.0).ok_or("Invalid voice heartbeat interval")? as u64;
 									   if !(100..=120000).contains(&interval) || heartbeat_ms.is_some(){return Err("Invalid voice heartbeat negotiation");}
-									   heartbeat_ms=Some(interval.min(5000));heartbeat_at=Instant::now();
+									   heartbeat_ms=Some(if cfg!(test) { interval.min(5000) } else { interval });heartbeat_at=Instant::now();
 								   },
-								   6=>if acknowledges(awaiting_ack,missed_acks,data["t"].as_u64()) {
-									   awaiting_ack=None;missed_acks=0;
-									   // A healthy resumed socket renews the consecutive resume budget.
-									   if !resuming {resume_attempts=0;}
+								   6=>{
+									   let nonce = data.as_u64().or_else(|| data["t"].as_u64());
+									   if acknowledges(awaiting_ack, missed_acks, nonce) {
+										   awaiting_ack = None;
+										   missed_acks = 0;
+										   // A healthy resumed socket renews the consecutive resume budget.
+										   if !resuming { resume_attempts = 0; }
+									   }
 								   },
 								   2=>{
 									   if udp.is_some(){return Err("Unexpected voice transport replacement; rejoin the call");}
@@ -1564,7 +1568,7 @@ async fn run_stream_inner(
 				if let Some(interval)=heartbeat_ms && now>=heartbeat_at {
 					if awaiting_ack.is_some() {
 						missed_acks+=1;
-						if missed_acks>=2 {return Err("Discord stream heartbeat was not acknowledged");}
+						if missed_acks>=3 {return Err("Discord stream heartbeat was not acknowledged");}
 					}
 					heartbeat_nonce=heartbeat_nonce.wrapping_add(1);
 					json_send(&mut ws,json!({"op":3,"d":{"t":heartbeat_nonce,"seq_ack":seq_ack}})).await?;
@@ -1827,8 +1831,8 @@ async fn run_stream_inner(
 						metrics.signal(Signal::Text,1);
 						metrics.signal(signal_of(op),1);
 						match op {
-							8=>{let interval=data["heartbeat_interval"].as_f64().filter(|v|v.is_finite()&&*v>=100.&&*v<=120000.).ok_or("Invalid stream heartbeat")? as u64; heartbeat_ms=Some(interval.min(5000));heartbeat_at=Instant::now();},
-							6=>if acknowledges(awaiting_ack,missed_acks,data["t"].as_u64()) {awaiting_ack=None;missed_acks=0;},
+							8=>{let interval=data["heartbeat_interval"].as_f64().filter(|v|v.is_finite()&&*v>=100.&&*v<=120000.).ok_or("Invalid stream heartbeat")? as u64; heartbeat_ms=Some(if cfg!(test) { interval.min(5000) } else { interval });heartbeat_at=Instant::now();},
+							6=>{let nonce = data.as_u64().or_else(|| data["t"].as_u64()); if acknowledges(awaiting_ack,missed_acks,nonce) {awaiting_ack=None;missed_acks=0;}},
 							2=>{
 								if udp.is_some(){return Err("Unexpected stream transport replacement");}
 								audio_ssrc=u32::try_from(number(data,"ssrc")?).ok().filter(|ssrc|*ssrc!=0).ok_or("Invalid stream SSRC")?;
@@ -1872,8 +1876,8 @@ async fn run_stream_inner(
 							12=>{
 								let user=id(data,"user_id")?;
 								if user!=credentials.user.0 {
-									if let Some(decoder) = decoder.as_ref() {announce_video(&mut receivers,decoder,user,data)?;}
-									if audio.is_some() && let Some(value)=data["audio_ssrc"].as_u64().and_then(|v|u32::try_from(v).ok()).filter(|v|*v!=0) {mixer.announce(user,value)?;}
+									if let Some(decoder) = decoder.as_ref() {let _ = announce_video(&mut receivers,decoder,user,data);}
+									if audio.is_some() && let Some(value)=data["audio_ssrc"].as_u64().and_then(|v|u32::try_from(v).ok()).filter(|v|*v!=0) {let _ = mixer.announce(user,value);}
 								}
 							},
 							13=>{let user=id(data,"user_id")?;receivers.remove(user);if let Some(decoder)=decoder.as_ref(){remove_decoder(decoder,user);}mixer.remove(user);let was_group_member=dave.is_group_member(user);let was_ready=dave.ready;if dave.disconnect(user)?{if dave.alone(){announced=false;awaiting_keyframe=true;invalidate_stream(&mut video, &mut share_audio);dave.enter_sole_member_waiting()?;deadline=None;}else if was_group_member{deadline=Some(Instant::now()+Duration::from_secs(30));announced=false;awaiting_keyframe=true;invalidate_stream(&mut video, &mut share_audio);}else if was_ready{dave.ready=true;deadline=None;}}},
