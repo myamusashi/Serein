@@ -75,7 +75,10 @@ fn endpoint(raw: &str) -> Result<String, &'static str> {
 	{
 		return Err("Voice endpoint is outside Discord media");
 	}
-	Ok(url.into())
+	// Normalize Discord voice endpoints to port 443. Discord voice gateways listen on
+	// both port 443 and alternative ports (e.g. 2053, 2083 for large rooms), but port 443
+	// avoids TLS handshake drops on DPI middleboxes and firewalls.
+	Ok(format!("wss://{host}:443/?v=8"))
 }
 fn public_ip(ip: IpAddr) -> bool {
 	match ip {
@@ -102,7 +105,16 @@ fn public_ip(ip: IpAddr) -> bool {
 		}
 	}
 }
-
+fn diag_log(msg: &str) {
+	use std::io::Write;
+	if let Ok(mut f) = std::fs::OpenOptions::new()
+		.create(true)
+		.append(true)
+		.open(std::env::temp_dir().join("serein_voice_diag.log"))
+	{
+		let _ = writeln!(f, "{msg}");
+	}
+}
 
 async fn send(ws: &mut Socket, message: Message) -> Result<(), &'static str> {
 	timeout(Duration::from_secs(5), ws.send(message))
@@ -2804,7 +2816,14 @@ mod tests {
 	}
 	#[test]
 	fn validated_endpoints_discovery_and_real_opus() {
-		assert!(endpoint("voice-1.discord.media:443").is_ok());
+		assert_eq!(
+			endpoint("voice-1.discord.media:443").unwrap(),
+			"wss://voice-1.discord.media:443/?v=8"
+		);
+		assert_eq!(
+			endpoint("c-bru01-67e5a38a.discord.media:2053").unwrap(),
+			"wss://c-bru01-67e5a38a.discord.media:443/?v=8"
+		);
 		for bad in [
 			"127.0.0.1",
 			"voice.discord.media.evil.test",
