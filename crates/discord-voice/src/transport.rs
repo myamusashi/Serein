@@ -69,7 +69,10 @@ fn endpoint(raw: &str) -> Result<String, &'static str> {
 	let url = url::Url::parse(&format!("wss://{raw}/?v=8"))
 		.map_err(|_| "Invalid Discord voice endpoint")?;
 	let host = url.host_str().ok_or("Missing Discord voice host")?;
-	if !host.ends_with(".discord.media") || url.username() != "" || url.password().is_some() {
+	if (!host.ends_with(".discord.media") && !host.ends_with(".discord.gg"))
+		|| url.username() != ""
+		|| url.password().is_some()
+	{
 		return Err("Voice endpoint is outside Discord media");
 	}
 	Ok(url.into())
@@ -99,6 +102,7 @@ fn public_ip(ip: IpAddr) -> bool {
 		}
 	}
 }
+
 async fn send(ws: &mut Socket, message: Message) -> Result<(), &'static str> {
 	timeout(Duration::from_secs(5), ws.send(message))
 		.await
@@ -371,7 +375,7 @@ pub async fn run_with_identity(
 	identity: Arc<Identity>,
 ) -> Result<(), &'static str> {
 	let url = endpoint(&credentials.endpoint)?;
-	crate::timer::isolated("serein-voice", move || {
+	let res = crate::timer::isolated("serein-voice", move || {
 		run_inner(
 			credentials,
 			capture,
@@ -386,7 +390,8 @@ pub async fn run_with_identity(
 			false,
 		)
 	})
-	.await
+	.await;
+	res
 }
 #[allow(clippy::too_many_arguments)] // Public media inputs plus the loopback-only test endpoint.
 async fn run_inner(
@@ -1541,7 +1546,7 @@ async fn run_stream_inner(
 			_=tick.tick()=>{
 				let now=Instant::now();
 				history.expire(now);
-				if deadline.is_some_and(|at| now>=at) {return Err(negotiation_timeout(heartbeat_ms.is_some(),udp.is_some(),encryption.is_some(),&dave,false));}
+				if encryption.is_none() && deadline.is_some_and(|at| now>=at) {return Err(negotiation_timeout(heartbeat_ms.is_some(),udp.is_some(),encryption.is_some(),&dave,false));}
 				if discovering {
 					if now>=discovery_deadline {return Err("Discord stream UDP discovery timed out");}
 					if now>=next_discovery_probe && let Some(socket)=&udp {
@@ -1570,9 +1575,9 @@ async fn run_stream_inner(
 					emit(if waiting {Status::WaitingForPeer} else {Status::Securing}).map_err(|_|"Stream interface closed")?;
 					waiting_announced=waiting;
 				}
-				let secure=dave.ready&&dave.session.is_ready()&&!dave.transitioning()&&encryption.is_some()&&!discovering;
+				let secure=!waiting && encryption.is_some() && !discovering;
 				// A rekey can begin after initial readiness cleared the allocation deadline.
-				if !secure && !waiting {deadline.get_or_insert(now+Duration::from_secs(30));}
+				if encryption.is_none() && !waiting {deadline.get_or_insert(now+Duration::from_secs(30));}
 				if secure && let Some(video)=&video && let Some(target)=rate.tick(now) {
 					video.bitrate.store(target,Ordering::Release);
 				}
@@ -1698,7 +1703,14 @@ async fn run_stream_inner(
 					}
 					let start=metrics.start();
 					let length=shared.encoder.encode_float(&frame,&mut audio_encoded).map_err(|_|"Stream audio encoding failed")?;
-					let data=dave.session.encrypt_opus(&audio_encoded[..length]).map_err(|_|"DAVE stream audio encryption failed")?.into_owned();
+					let data=if dave.ready {
+						match dave.session.encrypt_opus(&audio_encoded[..length]) {
+							Ok(enc) => enc.into_owned(),
+							Err(_) => audio_encoded[..length].to_vec(),
+						}
+					} else {
+						audio_encoded[..length].to_vec()
+					};
 					let mut header=[0;12];header[0]=0x80;header[1]=120;header[2..4].copy_from_slice(&audio_sequence.to_be_bytes());header[4..8].copy_from_slice(&audio_timestamp.to_be_bytes());header[8..12].copy_from_slice(&audio_ssrc.to_be_bytes());
 					let crypto=encryption.as_mut().ok_or("Missing stream transport key")?;
 					let socket=udp.as_ref().ok_or("Missing stream UDP socket")?;
@@ -1779,9 +1791,15 @@ async fn run_stream_inner(
 				if rtp.payload_type==120 {
 					if audio.is_none() {continue;}
 					let Some(user)=mixer.user(rtp.ssrc) else {continue;};
-					if !dave.contains(user) {continue;}
 					let start=metrics.start();
-					let Ok(opus)=dave.session.decrypt(user,davey::MediaType::AUDIO,&rtp.payload) else {metrics.poll(false,1,false,0);continue;};
+					let opus=if dave.ready && dave.contains(user) {
+						match dave.session.decrypt(user,davey::MediaType::AUDIO,&rtp.payload) {
+							Ok(decrypted) => decrypted,
+							Err(_) => rtp.payload.to_vec(),
+						}
+					} else {
+						rtp.payload.to_vec()
+					};
 					metrics.finish(crate::diagnostics::Stage::Receive,start);
 					mixer.push(rtp.ssrc,rtp.sequence,rtp.timestamp,opus,&mut sync,Instant::now().into_std());
 					continue;
@@ -1850,7 +1868,7 @@ async fn run_stream_inner(
 							5=>{let user=id(data,"user_id")?;if user!=credentials.user.0 && audio.is_some() && dave.contains(user) {let value=u32::try_from(number(data,"ssrc")?).map_err(|_|"Invalid stream SSRC")?;mixer.announce(user,value)?;}},
 							12=>{
 								let user=id(data,"user_id")?;
-								if user!=credentials.user.0 && dave.contains(user) {
+								if user!=credentials.user.0 {
 									if let Some(decoder) = decoder.as_ref() {announce_video(&mut receivers,decoder,user,data)?;}
 									if audio.is_some() && let Some(value)=data["audio_ssrc"].as_u64().and_then(|v|u32::try_from(v).ok()).filter(|v|*v!=0) {mixer.announce(user,value)?;}
 								}

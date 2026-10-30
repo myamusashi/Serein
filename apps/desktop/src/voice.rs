@@ -49,6 +49,7 @@ fn end_negotiation(channel: Id, request: u64, established: bool) -> voice::Comma
 
 const DEVICE_OPEN_TIMEOUT: Duration = Duration::from_secs(20);
 
+
 fn device_wait(
 	deadline: &mut Option<Instant>,
 	pending: bool,
