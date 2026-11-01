@@ -254,7 +254,7 @@ impl Hotkeys {
 						pending,
 						registered.clone(),
 						chords.clone(),
-						(ptt_held.clone(), ptm_held.clone()),
+						[ptt_held.clone(), ptm_held.clone()],
 						status.clone(),
 						wake.clone(),
 					)
@@ -459,13 +459,11 @@ async fn portal(
 	pending: Arc<AtomicU8>,
 	registered: Arc<AtomicU8>,
 	chords: Arc<Mutex<Vec<(KeybindAction, KeyChord)>>>,
-	(ptt_held, ptm_held): (
-		Arc<std::sync::atomic::AtomicU64>,
-		Arc<std::sync::atomic::AtomicU64>,
-	),
+	held: [Arc<std::sync::atomic::AtomicU64>; 2],
 	status: Arc<AtomicU8>,
 	wake: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<bool, ashpd::Error> {
+	let [ptt_held, ptm_held] = held;
 	use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
 	use futures_util::StreamExt;
 	// One action can own several chords, so group chords that translate to the same trigger.
