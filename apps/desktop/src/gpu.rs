@@ -128,19 +128,16 @@ fn acceleration_rank(
 	info: &wgpu::AdapterInfo,
 	prefer_integrated: bool,
 	enabled: bool,
-) -> (u8, u8, u8, u8) {
+) -> (u8, u8, u8) {
 	let (software_rasterizer, device, backend) = rank(info, prefer_integrated);
-	(
-		// With acceleration off, a CPU adapter is the requested software renderer; with it on,
-		// a software rasterizer is the last resort however it presents.
-		if enabled {
-			software_rasterizer
-		} else {
-			u8::from(info.device_type != wgpu::DeviceType::Cpu)
-		},
-		device,
-		backend,
-	)
+	// With acceleration off, a CPU adapter is the requested software renderer; with it on,
+	// a software rasterizer is the last resort however it presents.
+	let acceleration = if enabled {
+		software_rasterizer
+	} else {
+		u8::from(info.device_type != wgpu::DeviceType::Cpu)
+	};
+	(acceleration, device, backend)
 }
 
 #[cfg(test)]
