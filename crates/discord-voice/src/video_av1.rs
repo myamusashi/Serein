@@ -318,6 +318,7 @@ impl Bits<'_> {
 		}
 		self.skip(n)
 	}
+}
 // Bounded single-layer AV1 RTP packetization, after codec-aware DAVE encryption.
 //
 // AOM AV1 RTP payload format v1.0.0 sections 4.4–5:
